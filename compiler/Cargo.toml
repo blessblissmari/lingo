@@ -1,0 +1,18 @@
+[package]
+name = "lingoc"
+version = "0.1.0"
+edition = "2021"
+description = "Bootstrap compiler / interpreter for the lingo language"
+license = "MIT"
+
+[[bin]]
+name = "lingo"
+path = "src/main.rs"
+
+[lib]
+name = "lingoc"
+path = "src/lib.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
