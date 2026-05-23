@@ -22,9 +22,14 @@ pub use error::{LingoError, Stage};
 /// Run a lingo source string as if it were the whole program.
 /// `filename` is only used for error messages.
 pub fn run(source: &str, filename: &str) -> Result<(), String> {
+    run_with_argv(source, filename, Vec::new())
+}
+
+/// Same as `run` but also exposes `argv` to lingo code via the `args()` builtin.
+pub fn run_with_argv(source: &str, filename: &str, argv: Vec<String>) -> Result<(), String> {
     let tokens = lexer::lex(source).map_err(|e| e.render(source, filename))?;
     let program = parser::parse(tokens).map_err(|e| e.render(source, filename))?;
-    let mut interp = interp::Interp::new();
+    let mut interp = interp::Interp::new().with_argv(argv);
     interp.run_program(&program).map_err(|e| e.render(source, filename))?;
     Ok(())
 }
