@@ -228,6 +228,14 @@ print(double(7))
 }
 
 #[test]
+fn c_backend_str_methods_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("str_methods_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("str_methods_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+#[test]
 fn c_backend_greet_native_matches_interp() {
     // f-string interpolation of struct values is the v0.1.22 unlock.
     let Some((native_out, stderr, code)) = run_native("greet.lingo") else { return };
