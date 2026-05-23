@@ -27,6 +27,9 @@ pub enum Value {
     Str(String),
     Range(i64, i64),
     Vec_(Rc<RefCell<Vec<Value>>>),
+    /// Wrapped return value from a fallible fn: Ok(v) or Err(e).
+    /// Unwrapped by `?` or by `match`.
+    Result_(Rc<std::result::Result<Value, Value>>),
     Struct {
         type_name: String,
         fields: HashMap<String, Value>,
@@ -48,6 +51,7 @@ impl Value {
             Value::Str(_) => "str".into(),
             Value::Range(_, _) => "range".into(),
             Value::Vec_(_) => "vec".into(),
+            Value::Result_(_) => "result".into(),
             Value::Struct { type_name, .. } => type_name.clone(),
             Value::Enum { type_name, .. } => type_name.clone(),
             Value::None_ => "none".into(),
@@ -65,6 +69,10 @@ impl Value {
                 let parts: Vec<String> = rc.borrow().iter().map(|v| v.display()).collect();
                 format!("vec[{}]", parts.join(", "))
             }
+            Value::Result_(r) => match r.as_ref() {
+                Ok(v) => format!("ok({})", v.display()),
+                Err(e) => format!("err({})", e.display()),
+            },
             Value::Struct { type_name, fields } => {
                 let mut parts: Vec<String> = fields
                     .iter()
@@ -113,12 +121,16 @@ pub struct Interp {
     enums: HashMap<String, EnumDecl>,
     methods: HashMap<String, HashMap<String, FnDecl>>, // type -> method -> fn
     scopes: Vec<Scope>,
+    /// Set by `?` when the inner result is Err. The next statement boundary
+    /// converts this into a `Flow::Raise(...)` so it propagates to the caller.
+    pending_raise: Option<Value>,
 }
 
 #[derive(Debug)]
 enum Flow {
     Normal,
     Return(Value),
+    Raise(Value),
     Break,
     Continue,
 }
@@ -132,6 +144,7 @@ impl Interp {
             enums: HashMap::new(),
             methods: HashMap::new(),
             scopes: Vec::new(),
+            pending_raise: None,
         }
     }
 
@@ -267,9 +280,36 @@ impl Interp {
         }
         let flow = self.exec_block(&decl.body);
         self.scopes = saved;
+        let is_fallible = decl.raises.is_some();
         match flow? {
-            Flow::Return(v) => Ok(v),
-            Flow::Normal => Ok(Value::None_),
+            Flow::Return(v) => {
+                if is_fallible {
+                    Ok(Value::Result_(Rc::new(Ok(v))))
+                } else {
+                    Ok(v)
+                }
+            }
+            Flow::Normal => {
+                if is_fallible {
+                    Ok(Value::Result_(Rc::new(Ok(Value::None_))))
+                } else {
+                    Ok(Value::None_)
+                }
+            }
+            Flow::Raise(e) => {
+                if is_fallible {
+                    Ok(Value::Result_(Rc::new(Err(e))))
+                } else {
+                    Err(LingoError::new(
+                        Stage::Runtime,
+                        format!(
+                            "`raise` in non-fallible fn `{}` — declare `! ErrorType` after the return type",
+                            decl.name
+                        ),
+                        decl.span,
+                    ))
+                }
+            }
             Flow::Break => Err(LingoError::new(
                 Stage::Runtime,
                 "`break` outside loop",
@@ -296,10 +336,20 @@ impl Interp {
         Ok(flow)
     }
 
+    /// Evaluate an expression and surface any `?`-triggered error as a Flow::Raise.
+    /// Returns Ok(Ok(v)) for normal evaluation, Ok(Err(Flow::Raise(e))) when `?` fired.
+    fn eval_stmt(&mut self, e: &Expr) -> Result<std::result::Result<Value, Flow>, LingoError> {
+        let v = self.eval(e)?;
+        if let Some(err) = self.pending_raise.take() {
+            return Ok(Err(Flow::Raise(err)));
+        }
+        Ok(Ok(v))
+    }
+
     fn exec_stmt(&mut self, s: &Stmt) -> Result<Flow, LingoError> {
         match s {
             Stmt::Let { is_mut, name, ty: _, value, span } => {
-                let v = self.eval(value)?;
+                let v = match self.eval_stmt(value)? { Ok(v) => v, Err(f) => return Ok(f) };
                 for scope in self.scopes.iter().rev() {
                     if scope.bindings.contains_key(name) {
                         return Err(LingoError::new(
@@ -324,7 +374,7 @@ impl Interp {
                 Ok(Flow::Normal)
             }
             Stmt::Assign { target, value, span } => {
-                let v = self.eval(value)?;
+                let v = match self.eval_stmt(value)? { Ok(v) => v, Err(f) => return Ok(f) };
                 match target {
                     AssignTarget::Name(name) => {
                         for scope in self.scopes.iter_mut().rev() {
@@ -386,14 +436,18 @@ impl Interp {
             }
             Stmt::Return { value, .. } => {
                 let v = match value {
-                    Some(e) => self.eval(e)?,
+                    Some(e) => match self.eval_stmt(e)? { Ok(v) => v, Err(f) => return Ok(f) },
                     None => Value::None_,
                 };
                 Ok(Flow::Return(v))
             }
+            Stmt::Raise { value, .. } => {
+                let v = match self.eval_stmt(value)? { Ok(v) => v, Err(f) => return Ok(f) };
+                Ok(Flow::Raise(v))
+            }
             Stmt::If { arms, else_block, .. } => {
                 for (cond, block) in arms {
-                    let c = self.eval(cond)?;
+                    let c = match self.eval_stmt(cond)? { Ok(v) => v, Err(f) => return Ok(f) };
                     match c {
                         Value::Bool(true) => return self.exec_block(block),
                         Value::Bool(false) => continue,
@@ -413,7 +467,7 @@ impl Interp {
                 }
             }
             Stmt::For { var, iter, body, span: _ } => {
-                let it = self.eval(iter)?;
+                let it = match self.eval_stmt(iter)? { Ok(v) => v, Err(f) => return Ok(f) };
                 // collect the items to iterate (snapshot — no mutation of the source during the loop)
                 let items: Vec<Value> = match it {
                     Value::Range(a, b) => (a..b).map(Value::Int).collect(),
@@ -439,12 +493,13 @@ impl Interp {
                         Flow::Break => break,
                         Flow::Continue | Flow::Normal => continue,
                         Flow::Return(v) => return Ok(Flow::Return(v)),
+                        Flow::Raise(e) => return Ok(Flow::Raise(e)),
                     }
                 }
                 Ok(Flow::Normal)
             }
             Stmt::Match { scrutinee, arms, span } => {
-                let v = self.eval(scrutinee)?;
+                let v = match self.eval_stmt(scrutinee)? { Ok(v) => v, Err(f) => return Ok(f) };
                 for arm in arms {
                     self.scopes.push(Scope { bindings: HashMap::new() });
                     if self.pattern_match(&arm.pattern, &v)? {
@@ -464,6 +519,9 @@ impl Interp {
             Stmt::Continue(_) => Ok(Flow::Continue),
             Stmt::Expr(e) => {
                 self.eval(e)?;
+                if let Some(err) = self.pending_raise.take() {
+                    return Ok(Flow::Raise(err));
+                }
                 Ok(Flow::Normal)
             }
         }
@@ -533,6 +591,29 @@ impl Interp {
                         }
                         Ok(true)
                     }
+                    Value::Result_(rc) => {
+                        // built-in `ok(v)` / `err(e)` patterns on a fallible-fn result
+                        if type_name.is_some() {
+                            return Ok(false);
+                        }
+                        match (variant.as_str(), rc.as_ref()) {
+                            ("ok", Ok(inner)) => {
+                                if sub.len() != 1 {
+                                    return Err(LingoError::new(Stage::Runtime,
+                                        format!("`ok(...)` pattern needs exactly 1 field, got {}", sub.len()), *span));
+                                }
+                                self.pattern_match(&sub[0], inner)
+                            }
+                            ("err", Err(inner)) => {
+                                if sub.len() != 1 {
+                                    return Err(LingoError::new(Stage::Runtime,
+                                        format!("`err(...)` pattern needs exactly 1 field, got {}", sub.len()), *span));
+                                }
+                                self.pattern_match(&sub[0], inner)
+                            }
+                            _ => Ok(false),
+                        }
+                    }
                     Value::None_ => Ok(type_name.is_none() && variant == "none" && sub.is_empty()),
                     Value::Bool(b) => {
                         // allow `true`/`false` to also be matched as bare variants
@@ -563,6 +644,10 @@ impl Interp {
     }
 
     fn eval(&mut self, e: &Expr) -> Result<Value, LingoError> {
+        // short-circuit: a `?` already fired and we haven't reached a statement boundary yet
+        if self.pending_raise.is_some() {
+            return Ok(Value::None_);
+        }
         match &e.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
             ExprKind::Float(f) => Ok(Value::Float(*f)),
@@ -743,8 +828,34 @@ impl Interp {
                 let mut vals = Vec::with_capacity(items.len());
                 for it in items {
                     vals.push(self.eval(it)?);
+                    if self.pending_raise.is_some() {
+                        return Ok(Value::None_);
+                    }
                 }
                 Ok(Value::Vec_(Rc::new(RefCell::new(vals))))
+            }
+            ExprKind::Try(inner) => {
+                let v = self.eval(inner)?;
+                if self.pending_raise.is_some() {
+                    return Ok(Value::None_);
+                }
+                match v {
+                    Value::Result_(rc) => match rc.as_ref() {
+                        Ok(val) => Ok(val.clone()),
+                        Err(err) => {
+                            self.pending_raise = Some(err.clone());
+                            Ok(Value::None_)
+                        }
+                    },
+                    other => Err(LingoError::new(
+                        Stage::Runtime,
+                        format!(
+                            "`?` requires a fallible result, got {}. did you forget `! E` on the called fn?",
+                            other.type_name()
+                        ),
+                        e.span,
+                    )),
+                }
             }
         }
     }
