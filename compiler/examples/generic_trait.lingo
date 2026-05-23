@@ -1,0 +1,58 @@
+# v0.2.5: user-defined generic traits.
+#
+# `trait Encoder[T]:` declares a trait parameterised over the value type
+# it encodes.  Each `impl Encoder[<concrete>] for <Receiver>:` plugs in a
+# concrete `T` so the impl method's signature lines up with the trait's.
+# Dispatch stays static: at call sites we know the receiver's type and
+# the impl is picked at compile time (mangled `Receiver_method` in C).
+
+trait Encoder[T]:
+    fn encode(self, v: T) -> str
+
+struct IntEnc:
+    pad: int
+
+struct StrEnc:
+    prefix: str
+
+impl Encoder[int] for IntEnc:
+    fn encode(self, v: int) -> str:
+        return f"int[{self.pad}]({v})"
+
+impl Encoder[str] for StrEnc:
+    fn encode(self, v: str) -> str:
+        return f"{self.prefix}={v}"
+
+# `From[E]` is the built-in generic trait the `?` operator consults.
+# v0.2.5 declares it through the same machinery (synthesized if absent),
+# so this `impl` validates against the trait-arity gate uniformly.
+
+enum ParseErr:
+    Empty
+    Bad
+
+impl From[str] for ParseErr:
+    fn from(e: str) -> ParseErr:
+        if e.contains("can't parse \"\""):
+            return ParseErr.Empty
+        return ParseErr.Bad
+
+fn parse_pos(s: str) -> int ! ParseErr:
+    let n = int(s)?
+    return n
+
+fn main():
+    let ie = IntEnc{pad: 4}
+    let se = StrEnc{prefix: "name"}
+    print(ie.encode(42))
+    print(se.encode("ada"))
+
+    match parse_pos("17"):
+        ok(n): print(f"ok: {n}")
+        err(_): print("err: bad")
+    match parse_pos(""):
+        ok(_): print("ok: ??")
+        err(e):
+            match e:
+                Empty: print("err: empty")
+                Bad:   print("err: bad")

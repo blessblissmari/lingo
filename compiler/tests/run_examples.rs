@@ -748,6 +748,60 @@ fn c_backend_try_else_coerce_native() {
 }
 
 #[test]
+fn generic_trait_interp() {
+    // v0.2.5: user-defined generic trait + the built-in `From` going
+    // through the same general impl-resolution gate.  Two `Encoder[T]`
+    // impls (T = int and T = str), each with a distinct receiver
+    // struct, plus a `From[str] for ParseErr` impl that drives `?`.
+    let (stdout, stderr, code) = run("generic_trait.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+int[4](42)\n\
+name=ada\n\
+ok: 17\n\
+err: empty\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_generic_trait_native() {
+    // v0.2.5: native build of the same generic-trait example.  Static
+    // dispatch keeps the two `Encoder` impls as plain mangled C fns
+    // (`IntEnc_encode` / `StrEnc_encode`), and the `From[str] for
+    // ParseErr` impl emits as the existing `lingo_from_str__ParseErr`
+    // mangled helper the `?` operator already knows how to call.
+    let Some((stdout, stderr, code)) = run_native("generic_trait.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("generic_trait.lingo");
+    assert_eq!(stdout, interp_out, "native generic_trait drifted from interp");
+}
+
+#[test]
+fn generic_trait_arity_mismatch_too_few() {
+    // v0.2.5: clear diagnostic when a generic trait's bracket arity
+    // doesn't match the impl.  Smoke-test only — running the source
+    // is expected to fail at resolve time on both backends.
+    use std::process::Command;
+    let dir = std::env::temp_dir().join("lingo_v025_arity_too_few.lingo");
+    std::fs::write(&dir, "trait Foo[T]:\n    fn show(self) -> str\n\nstruct S:\n    n: int\n\nimpl Foo for S:\n    fn show(self) -> str:\n        return \"x\"\n\nfn main():\n    print(\"hi\")\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_lingo")).arg(&dir).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("trait `Foo` declares 1 type parameter"),
+            "expected arity diagnostic, got: {stderr}");
+}
+
+#[test]
+fn generic_trait_arity_mismatch_too_many() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join("lingo_v025_arity_too_many.lingo");
+    std::fs::write(&dir, "trait Foo:\n    fn show(self) -> str\n\nstruct S:\n    n: int\n\nimpl Foo[int] for S:\n    fn show(self) -> str:\n        return \"x\"\n\nfn main():\n    print(\"hi\")\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_lingo")).arg(&dir).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("trait `Foo` takes no type parameters"),
+            "expected arity diagnostic, got: {stderr}");
+}
+
+#[test]
 fn parse_float_interp() {
     // v0.2.4: `float(s) -> float ! str` on the interp side.  Identical
     // shape to v0.2.0's `parse_int_interp`: parsing + From-trait coercion

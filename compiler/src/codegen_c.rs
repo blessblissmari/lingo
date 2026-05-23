@@ -432,21 +432,64 @@ impl Codegen {
                 }
             }
         }
+        // v0.2.5: synthesize the built-in `From[E]` trait if any
+        // `impl From[..] for ..:` block is present but the user didn't
+        // declare it.  Keeps the v0.2.3 source-level shape unchanged
+        // while letting the general impl-resolution gate validate
+        // arity uniformly across user-defined generic traits and the
+        // built-in.
+        let needs_synthetic_from = prog.items.iter().any(|it| matches!(
+            it,
+            Item::ImplTrait(b) if b.trait_name == "From"
+        )) && !traits.contains_key("From");
+        if needs_synthetic_from {
+            traits.insert(
+                "From".into(),
+                TraitDecl {
+                    name: "From".into(),
+                    type_params: vec!["E".into()],
+                    methods: Vec::new(),
+                    span: crate::error::Span::new(0, 0),
+                },
+            );
+        }
         let mut lowered_items: Vec<Item> = Vec::with_capacity(prog.items.len());
         let mut seen_pair: HashMap<(String, String), Span> = HashMap::new(); // (trait, target)
         for item in &prog.items {
             match item {
                 Item::Trait(_) => { /* drop: pure declaration, lowered above */ }
                 Item::ImplTrait(b) => {
+                    // v0.2.5: general gate first — every impl must refer
+                    // to a known trait and supply the right number of
+                    // type-args.
+                    let trait_decl = traits.get(&b.trait_name).cloned().ok_or_else(|| {
+                        LingoError::new(
+                            Stage::Resolve,
+                            format!("`impl {} for {}` refers to unknown trait `{}`",
+                                    b.trait_name, b.target, b.trait_name),
+                            b.span,
+                        )
+                    })?;
+                    if b.trait_args.len() != trait_decl.type_params.len() {
+                        let want = trait_decl.type_params.len();
+                        let got = b.trait_args.len();
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            if want == 0 {
+                                format!("trait `{}` takes no type parameters, but impl provided {} (`[{}]`)",
+                                        b.trait_name, got, b.trait_args.join(", "))
+                            } else {
+                                format!("trait `{}` declares {} type parameter(s) ({}); impl provided {}",
+                                        b.trait_name, want, trait_decl.type_params.join(", "), got)
+                            },
+                            b.span,
+                        ));
+                    }
+                    // v0.2.5: `From`-specific lowering still wins — `From`
+                    // impls are emitted as standalone mangled C functions
+                    // (`lingo_from_<E1>__<E2>`) the `?` operator calls
+                    // directly, not as receiver-typed `impl Type:` methods.
                     if b.trait_name == "From" {
-                        if b.trait_args.len() != 1 {
-                            return Err(LingoError::new(
-                                Stage::Resolve,
-                                format!("`impl From[..] for {}` expects exactly one type arg, got {}",
-                                        b.target, b.trait_args.len()),
-                                b.span,
-                            ));
-                        }
                         if b.methods.len() != 1 || b.methods[0].name != "from" {
                             return Err(LingoError::new(
                                 Stage::Resolve,
@@ -475,22 +518,6 @@ impl Codegen {
                         lowered_items.push(Item::Fn(renamed));
                         continue;
                     }
-                    if !b.trait_args.is_empty() {
-                        return Err(LingoError::new(
-                            Stage::Resolve,
-                            format!("trait `{}` does not take type args (only built-in `From` does in v0.2.3)",
-                                    b.trait_name),
-                            b.span,
-                        ));
-                    }
-                    let trait_decl = traits.get(&b.trait_name).cloned().ok_or_else(|| {
-                        LingoError::new(
-                            Stage::Resolve,
-                            format!("`impl {} for {}` refers to unknown trait `{}`",
-                                    b.trait_name, b.target, b.trait_name),
-                            b.span,
-                        )
-                    })?;
                     let key = (b.trait_name.clone(), b.target.clone());
                     if let Some(prev) = seen_pair.insert(key, b.span) {
                         let _ = prev;
