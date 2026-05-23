@@ -361,6 +361,9 @@ impl Codegen {
         out.push_str("#include <stdbool.h>\n");
         out.push_str("#include <math.h>\n"); // for `pow`, `sqrt`, etc. when f64 lands
         out.push_str("#include <stddef.h>\n"); // size_t, NULL
+        out.push_str("#include <string.h>\n"); // strlen/strcmp/strstr/memcpy (str runtime, v0.1.13)
+        out.push_str("#include <stdlib.h>\n"); // malloc (str runtime, v0.1.13)
+        out.push_str("#include <stdarg.h>\n"); // va_list (lingo_fmt_alloc, v0.1.13)
         out.push_str("\n");
         // Tiny built-in runtime types — typedef'd up front so user code and
         // generated method calls can refer to them by name.  Read-only vec
@@ -1025,6 +1028,69 @@ impl Codegen {
                     e.span,
                 ));
             }
+            ExprKind::FString(parts) => {
+                // Lower `f"hello, {name}, you are {age}"` to a snprintf call:
+                //   - assemble a format string with `%s` for each interpolation
+                //   - build the args list using printf_fmt() for each value
+                //   - two-pass snprintf to size and fill a fresh malloc'd buffer
+                // We lift the work into an expression by emitting a statement-expr
+                // helper.  Since C doesn't have stmt-exprs portably, we instead emit
+                // a runtime function `lingo_fmt_alloc` for the simple case where
+                // every interpolation is `%s`/`%lld`/etc., and synthesize a printf-
+                // shaped call.
+                let mut fmt = String::new();
+                let mut vals: Vec<String> = Vec::new();
+                for p in parts {
+                    match p {
+                        FStringPart::Lit(s) => {
+                            // Escape `%` to avoid it being treated as a fmt spec,
+                            // and escape C string-literal specials (`"`, `\`, etc.).
+                            for ch in s.chars() {
+                                if ch == '%' { fmt.push_str("%%"); }
+                                else { fmt.push_str(&escape_c(&ch.to_string())); }
+                            }
+                        }
+                        FStringPart::Expr(ex) => {
+                            let (code, ty) = self.gen_expr(ex)?;
+                            match &ty {
+                                CType::Bool => {
+                                    fmt.push_str("%s");
+                                    vals.push(format!("(({}) ? \"true\" : \"false\")", code));
+                                }
+                                CType::Str => {
+                                    fmt.push_str("%s");
+                                    vals.push(code);
+                                }
+                                CType::I64 | CType::U64 | CType::F64 => {
+                                    fmt.push_str(ty.printf_fmt());
+                                    vals.push(code);
+                                }
+                                other => {
+                                    return Err(LingoError::new(
+                                        Stage::Resolve,
+                                        format!("C backend: f-string can't interpolate `{}` yet \
+                                                 (only primitives in v0.1.13)",
+                                                other.c_decl()),
+                                        ex.span,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                // The varargs list and format are baked into a single call.
+                // `lingo_fmt_alloc` does the two-pass snprintf for us — see the
+                // runtime helper below.
+                let args = if vals.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", vals.join(", "))
+                };
+                (
+                    format!("lingo_fmt_alloc(\"{}\"{})", fmt, args),
+                    CType::Str,
+                )
+            }
             ExprKind::VecLit(items) => {
                 // First-cut: only `vec[<i64 exprs>]`.  Lowers to a C99 compound
                 // literal: `((lingo_vec_i64_t){ .data = (int64_t[]){...}, .len = N })`.
@@ -1078,6 +1144,23 @@ impl Codegen {
         let (b_code, b_ty) = self.gen_expr(b)?;
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                // String concat is the one non-numeric `+` we recognize.  Lowers to
+                // a runtime helper that mallocs a fresh buffer and copies both
+                // halves.  v0.1.x leaks; we'll thread an allocator through when
+                // `defer` lands.
+                if op == BinOp::Add && a_ty == CType::Str && b_ty == CType::Str {
+                    return Ok((
+                        format!("lingo_str_concat({}, {})", a_code, b_code),
+                        CType::Str,
+                    ));
+                }
+                if op == BinOp::Add && (a_ty == CType::Str || b_ty == CType::Str) {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `+` between str and non-str — use f-strings or `str(x)` to convert first",
+                        a.span,
+                    ));
+                }
                 // Float-aware numeric op.  We don't do implicit numeric promotion in
                 // lingo, but if either operand is f64 we treat the whole expression
                 // as f64 and let C upcast the int side (which is exactly what lingo's
@@ -1122,8 +1205,18 @@ impl Codegen {
                 };
                 Ok((format!("lingo_ipow({}, {})", a_code, b_code), ty))
             }
-            BinOp::Eq => Ok((format!("({} == {})", a_code, b_code), CType::Bool)),
-            BinOp::Ne => Ok((format!("({} != {})", a_code, b_code), CType::Bool)),
+            BinOp::Eq => {
+                if a_ty == CType::Str && b_ty == CType::Str {
+                    return Ok((format!("(strcmp({}, {}) == 0)", a_code, b_code), CType::Bool));
+                }
+                Ok((format!("({} == {})", a_code, b_code), CType::Bool))
+            }
+            BinOp::Ne => {
+                if a_ty == CType::Str && b_ty == CType::Str {
+                    return Ok((format!("(strcmp({}, {}) != 0)", a_code, b_code), CType::Bool));
+                }
+                Ok((format!("({} != {})", a_code, b_code), CType::Bool))
+            }
             BinOp::Lt => Ok((format!("({} <  {})", a_code, b_code), CType::Bool)),
             BinOp::Le => Ok((format!("({} <= {})", a_code, b_code), CType::Bool)),
             BinOp::Gt => Ok((format!("({} >  {})", a_code, b_code), CType::Bool)),
@@ -1181,6 +1274,65 @@ impl Codegen {
                     type_name, tag, variant, parts.join(", ")),
             CType::Enum(type_name.to_string()),
         ))
+    }
+
+    /// Built-in methods on `str` (= `const char*` in C).  v0.1.13 subset:
+    ///   - `s.len()`         -> `((int64_t)strlen(s))`        (byte count!)
+    ///   - `s.contains(t)`   -> `(strstr(s, t) != NULL)`
+    ///   - `s.starts_with(t)`-> `lingo_str_starts_with(s, t)`
+    ///   - `s.ends_with(t)`  -> `lingo_str_ends_with(s, t)`
+    ///
+    /// NOTE: `len` returns *bytes*, not Unicode chars, to keep the runtime
+    /// dependency-free.  The interp returns chars.  Plain ASCII matches;
+    /// non-ASCII content diverges.  Pinned per test until we ship a real
+    /// UTF-8 string runtime.
+    fn gen_str_method(
+        &mut self,
+        recv_code: &str,
+        method: &str,
+        args: &[Arg],
+        span: Span,
+    ) -> Result<(String, CType), LingoError> {
+        let arg_str = |this: &mut Self, n: usize| -> Result<String, LingoError> {
+            let a = &args[n];
+            if a.name.is_some() {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("C backend: `str.{}` takes positional args", method),
+                    a.span,
+                ));
+            }
+            let (c, t) = this.gen_expr(&a.value)?;
+            if t != CType::Str {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("C backend: `str.{}` expects str arg, got `{}`", method, t.c_decl()),
+                    a.span,
+                ));
+            }
+            Ok(c)
+        };
+        match (method, args.len()) {
+            ("len", 0) => Ok((format!("((int64_t)strlen({}))", recv_code), CType::I64)),
+            ("contains", 1) => {
+                let needle = arg_str(self, 0)?;
+                Ok((format!("(strstr({}, {}) != NULL)", recv_code, needle), CType::Bool))
+            }
+            ("starts_with", 1) => {
+                let needle = arg_str(self, 0)?;
+                Ok((format!("lingo_str_starts_with({}, {})", recv_code, needle), CType::Bool))
+            }
+            ("ends_with", 1) => {
+                let needle = arg_str(self, 0)?;
+                Ok((format!("lingo_str_ends_with({}, {})", recv_code, needle), CType::Bool))
+            }
+            (m, n) => Err(LingoError::new(
+                Stage::Resolve,
+                format!("C backend: `str.{}` with {} arg(s) is not supported yet \
+                         (have: len/0, contains/1, starts_with/1, ends_with/1)", m, n),
+                span,
+            )),
+        }
     }
 
     /// Built-in methods on `vec[i64]`.  Subset for v0.1.12:
@@ -1249,6 +1401,9 @@ impl Codegen {
                     let probe = self.gen_expr(receiver)?;
                     if probe.1 == CType::VecI64 {
                         return self.gen_vec_method(&probe.0, method, args, span);
+                    }
+                    if probe.1 == CType::Str {
+                        return self.gen_str_method(&probe.0, method, args, span);
                     }
                 }
                 // Static call when the receiver is a known struct name.
@@ -1444,6 +1599,55 @@ static int64_t lingo_ipow(int64_t base, int64_t exp) {
     return r;
 }
 
+/* === str runtime (v0.1.13) ===
+ * Tiny, deps-free, *leaking* string helpers.  Buffers are malloc'd and never
+ * freed; once we ship an allocator + `defer`, these will route through it
+ * instead.  Until then, lingo programs leak proportional to their string
+ * activity, which is fine for batch programs and well-known to users.
+ */
+__attribute__((unused))
+static const char* lingo_str_concat(const char* a, const char* b) {
+    size_t la = strlen(a), lb = strlen(b);
+    char* out = (char*)malloc(la + lb + 1);
+    if (!out) { fprintf(stderr, \"lingo: out of memory in str_concat\\n\"); exit(1); }
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    out[la + lb] = '\\0';
+    return out;
+}
+
+__attribute__((unused))
+static bool lingo_str_starts_with(const char* s, const char* prefix) {
+    size_t lp = strlen(prefix);
+    return strncmp(s, prefix, lp) == 0;
+}
+
+__attribute__((unused))
+static bool lingo_str_ends_with(const char* s, const char* suffix) {
+    size_t ls = strlen(s), lsuf = strlen(suffix);
+    if (lsuf > ls) return false;
+    return memcmp(s + (ls - lsuf), suffix, lsuf) == 0;
+}
+
+/* Two-pass snprintf into a fresh heap buffer.  Returned `const char*` leaks
+ * on purpose (see note above).  Used by the f-string lowering. */
+__attribute__((unused))
+__attribute__((format(printf, 1, 2)))
+static const char* lingo_fmt_alloc(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) { fprintf(stderr, \"lingo: vsnprintf failed in fmt_alloc\\n\"); exit(1); }
+    char* out = (char*)malloc((size_t)n + 1);
+    if (!out) { fprintf(stderr, \"lingo: out of memory in fmt_alloc\\n\"); exit(1); }
+    vsnprintf(out, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    return out;
+}
+
 ";
     // Insert helper right before the protos section.
     // (Protos always start after the three #include lines + blank.)
@@ -1451,7 +1655,7 @@ static int64_t lingo_ipow(int64_t base, int64_t exp) {
     // we emit is <math.h>; if that changes, update this marker too.
     // Marker must match the *exact* trailing chunk of the prelude in `gen_program`.
     // If you add/reorder #includes there, update this string too.
-    let marker = "#include <math.h>\n#include <stddef.h>\n\n";
+    let marker = "#include <math.h>\n#include <stddef.h>\n#include <string.h>\n#include <stdlib.h>\n#include <stdarg.h>\n\n";
     Ok(match core.find(marker) {
         Some(idx) => {
             let split = idx + marker.len();
