@@ -1,0 +1,24 @@
+# structs with methods.
+# `impl Point:` adds methods. `self` is a named parameter.
+# `Point{x: 3.0, y: 4.0}` is the only constructor syntax.
+
+struct Point:
+    x: f64
+    y: f64
+
+impl Point:
+    fn origin() -> Point:
+        return Point{x: 0.0, y: 0.0}
+
+    fn dist(self, other: Point) -> f64:
+        let dx = self.x - other.x
+        let dy = self.y - other.y
+        return (dx * dx + dy * dy) ** 0.5
+
+fn main():
+    let a = Point{x: 0.0, y: 0.0}
+    let b = Point{x: 3.0, y: 4.0}
+    print("a:", a)
+    print("b:", b)
+    print("dist:", a.dist(b))
+    print("origin:", Point.origin())
