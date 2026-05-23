@@ -13,10 +13,16 @@ fn cargo_bin() -> String {
 }
 
 fn run(file: &str) -> (String, String, i32) {
-    let out = Command::new(cargo_bin())
-        .arg(format!("examples/{file}"))
-        .output()
-        .expect("failed to run lingo");
+    run_with_args(file, &[])
+}
+
+fn run_with_args(file: &str, prog_args: &[&str]) -> (String, String, i32) {
+    let mut cmd = Command::new(cargo_bin());
+    cmd.arg(format!("examples/{file}"));
+    for a in prog_args {
+        cmd.arg(a);
+    }
+    let out = cmd.output().expect("failed to run lingo");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -103,6 +109,17 @@ unique words: 9
   lazy: 1
   dog: 1
   is: 1
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn io_roundtrip() {
+    let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+wrote and read back 36 bytes
+hello from lingo, 3 arg(s) passed in
 ";
     assert_eq!(stdout, expected);
 }
