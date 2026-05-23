@@ -27,6 +27,7 @@
 - [x] **f-strings** `f"hi {name}, sum = {a + b}"` with arbitrary expressions inside `{...}`
 - [x] **map[K, V]** literal `map{key: val, key: val}` + `.len/.has/.get/.set/.remove/.keys/.values/.clear`
 - [x] **utf-8 in string literals** (lexer copies full codepoints, not bytes)
+- [x] **io builtins** `read_file`, `write_file`, `args()`, `int(s)`, `str(x)` — all return `T ! str` where fallible
 - [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
 - [ ] traits (`trait` + `impl Trait for Type`)
