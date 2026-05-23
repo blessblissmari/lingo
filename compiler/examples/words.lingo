@@ -1,0 +1,20 @@
+# vec, string methods, and for-over-vec.
+# (no file IO yet — that's Sprint E.)
+
+fn main():
+    let line = "  the quick brown fox jumps over the lazy dog  "
+    let trimmed = line.trim()
+    print("trimmed:", trimmed)
+    print("upper:", trimmed.to_upper())
+
+    let words = trimmed.split(" ")
+    print("count:", words.len())
+
+    let mut long = vec[]
+    for w in words:
+        if w.len() >= 5:
+            long.push(w)
+
+    print("long words:", long)
+    print("contains 'quick'?", words.contains("quick"))
+    print("contains 'cat'?", words.contains("cat"))
