@@ -45,13 +45,16 @@ enum CType {
     /// User-defined tagged-union (lingo `enum`). Same naming convention:
     /// the C type is a typedef of the same lingo name.
     Enum(String),
-    /// `vec[i64]` — a small POD struct holding a `const int64_t*` plus length.
-    /// First-cut runtime: read-only, lifetime tied to the enclosing scope
-    /// (we lower literals to C99 compound array literals).  Once we wire
-    /// up an allocator, this grows to a real owning vector with `push`/`pop`.
-    /// Limited to `i64` elements for now; generic vec lands when we get
-    /// monomorphization.
-    VecI64,
+    /// `vec[T]` — a small POD struct holding a `const T*` plus length.
+    /// Read-only for now; literals lower to C99 compound array literals so
+    /// the backing array's lifetime is the enclosing C block.  Mutation
+    /// (`push`/`pop`) waits on the allocator story.
+    ///
+    /// Element type is restricted to a small fixed set (i64 / f64 / str)
+    /// because we hand-emit per-element-type runtime structs and helpers
+    /// instead of doing full monomorphization.  Once generics land we'll
+    /// collapse those down to a single template.
+    Vec(Box<CType>),
 }
 
 impl CType {
@@ -65,7 +68,14 @@ impl CType {
             CType::Void => "void".into(),
             CType::Struct(name) => name.clone(),
             CType::Enum(name) => name.clone(),
-            CType::VecI64 => "lingo_vec_i64_t".into(),
+            CType::Vec(inner) => match inner.as_ref() {
+                CType::I64 => "lingo_vec_i64_t".into(),
+                CType::F64 => "lingo_vec_f64_t".into(),
+                CType::Str => "lingo_vec_str_t".into(),
+                // Unsupported inner types are caught at `map_type_with`, so
+                // hitting this branch means the compiler has a bug.
+                other => panic!("unsupported vec element type in codegen: {:?}", other),
+            },
         }
     }
 
@@ -82,7 +92,7 @@ impl CType {
             CType::Void => "",
             CType::Struct(_) => "<struct>", // not directly printable yet
             CType::Enum(_) => "<enum>",     // not directly printable yet
-            CType::VecI64 => "<vec>",        // printed via emit_print special-case
+            CType::Vec(_) => "<vec>",        // printed via emit_print special-case
         }
     }
 }
@@ -107,15 +117,16 @@ fn map_type_with(
             ));
         }
         let inner = map_type_with(&t.type_args[0], span, structs, enums)?;
-        if inner != CType::I64 {
-            return Err(LingoError::new(
+        match &inner {
+            CType::I64 | CType::F64 | CType::Str => {}
+            other => return Err(LingoError::new(
                 Stage::Resolve,
-                format!("C backend: only `vec[i64]` is supported in v0.1.12 (got `vec[{}]`)",
-                        inner.c_decl()),
+                format!("C backend: only `vec[i64]`, `vec[f64]`, `vec[str]` are supported in v0.1.14 (got `vec[{}]`)",
+                        other.c_decl()),
                 span,
-            ));
+            )),
         }
-        return Ok(CType::VecI64);
+        return Ok(CType::Vec(Box::new(inner)));
     }
     if !t.type_args.is_empty() {
         return Err(LingoError::new(
@@ -370,7 +381,9 @@ impl Codegen {
         // for v0.1.12: data lifetime tracks the enclosing C block.  When the
         // allocator story lands, this grows to an owning vector with cap +
         // realloc, without changing the public API (`len`/`get`).
-        out.push_str("typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\n\n");
+        out.push_str("typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\n");
+        out.push_str("typedef struct { const double*  data; int64_t len; } lingo_vec_f64_t;\n");
+        out.push_str("typedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\n\n");
         if !self.type_defs.is_empty() {
             out.push_str(&self.type_defs);
         }
@@ -567,27 +580,8 @@ impl Codegen {
                         // Bind the iterable to a temp so we evaluate once even if it's
                         // a compound literal like `vec[1,2,3]`.
                         let (iter_code, iter_ty) = self.gen_expr(iter)?;
-                        match iter_ty {
-                            CType::VecI64 => {
-                                let tmp = format!("__it_{}", self.tmp_counter);
-                                self.tmp_counter += 1;
-                                writeln!(self.body, "{}lingo_vec_i64_t {} = {};",
-                                         self.pad(), tmp, iter_code).unwrap();
-                                writeln!(self.body,
-                                    "{}for (int64_t __ix_{n} = 0; __ix_{n} < {tmp}.len; ++__ix_{n}) {{",
-                                    self.pad(), n = self.tmp_counter).unwrap();
-                                self.tmp_counter += 1;
-                                self.indent += 1;
-                                writeln!(self.body,
-                                    "{}int64_t {var} = {tmp}.data[__ix_{n}];",
-                                    self.pad(), n = self.tmp_counter - 1).unwrap();
-                                self.scopes.push(HashMap::new());
-                                self.scopes.last_mut().unwrap().insert(var.clone(), CType::I64);
-                                for s in &body.stmts { self.emit_stmt(s)?; }
-                                self.scopes.pop();
-                                self.indent -= 1;
-                                writeln!(self.body, "{}}}", self.pad()).unwrap();
-                            }
+                        let elem_ty = match &iter_ty {
+                            CType::Vec(inner) => (**inner).clone(),
                             other => {
                                 return Err(LingoError::new(
                                     Stage::Resolve,
@@ -596,7 +590,28 @@ impl Codegen {
                                     *span,
                                 ));
                             }
-                        }
+                        };
+                        let vec_c = iter_ty.c_decl();
+                        let elem_c = elem_ty.c_decl();
+                        let tmp = format!("__it_{}", self.tmp_counter);
+                        self.tmp_counter += 1;
+                        writeln!(self.body, "{}{} {} = {};",
+                                 self.pad(), vec_c, tmp, iter_code).unwrap();
+                        let ix = self.tmp_counter;
+                        self.tmp_counter += 1;
+                        writeln!(self.body,
+                            "{}for (int64_t __ix_{ix} = 0; __ix_{ix} < {tmp}.len; ++__ix_{ix}) {{",
+                            self.pad(), ix = ix).unwrap();
+                        self.indent += 1;
+                        writeln!(self.body,
+                            "{}{} {var} = {tmp}.data[__ix_{ix}];",
+                            self.pad(), elem_c, ix = ix).unwrap();
+                        self.scopes.push(HashMap::new());
+                        self.scopes.last_mut().unwrap().insert(var.clone(), elem_ty);
+                        for s in &body.stmts { self.emit_stmt(s)?; }
+                        self.scopes.pop();
+                        self.indent -= 1;
+                        writeln!(self.body, "{}}}", self.pad()).unwrap();
                     }
                 }
             }
@@ -1092,40 +1107,56 @@ impl Codegen {
                 )
             }
             ExprKind::VecLit(items) => {
-                // First-cut: only `vec[<i64 exprs>]`.  Lowers to a C99 compound
-                // literal: `((lingo_vec_i64_t){ .data = (int64_t[]){...}, .len = N })`.
+                // Lowers to a C99 compound literal:
+                //   ((lingo_vec_<T>_t){ .data = (<C-T>[]){ a, b, c }, .len = N })
                 // The inner array's lifetime is the enclosing block (C99 §6.5.2.5),
                 // so the vec is valid as long as we're inside that block — fine for
                 // reads/iteration; mutation lands when we wire up an allocator.
                 if items.is_empty() {
-                    // Need an explicit type to know the element type for an empty
-                    // literal; v0.1.12 only supports i64, so default there.
+                    // Empty literal — we can't infer the element type; default to
+                    // i64 for now.  Once we have a type checker it can fix this
+                    // from context (e.g. variable annotation).
                     return Ok((
                         "((lingo_vec_i64_t){ .data = NULL, .len = 0 })".to_string(),
-                        CType::VecI64,
+                        CType::Vec(Box::new(CType::I64)),
                     ));
                 }
+                // Infer element type from the first item; require the rest to match.
+                let (first_code, first_ty) = self.gen_expr(&items[0])?;
+                match first_ty {
+                    CType::I64 | CType::F64 | CType::Str => {}
+                    ref other => return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: vec element type `{}` not supported (i64/f64/str only)",
+                                other.c_decl()),
+                        items[0].span,
+                    )),
+                }
                 let mut parts = Vec::with_capacity(items.len());
-                for it in items {
+                parts.push(first_code);
+                for it in &items[1..] {
                     let (code, ty) = self.gen_expr(it)?;
-                    if ty != CType::I64 {
+                    if ty != first_ty {
                         return Err(LingoError::new(
                             Stage::Resolve,
-                            format!("C backend: only `vec[i64]` is supported (got element type `{}`)",
-                                    ty.c_decl()),
+                            format!("C backend: vec literal mixed types — first was `{}`, got `{}`",
+                                    first_ty.c_decl(), ty.c_decl()),
                             it.span,
                         ));
                     }
                     parts.push(code);
                 }
-                let len = items.len();
+                let vec_ty = CType::Vec(Box::new(first_ty.clone()));
+                let elem_c = first_ty.c_decl();
                 (
                     format!(
-                        "((lingo_vec_i64_t){{ .data = (int64_t[]){{ {} }}, .len = {} }})",
+                        "(({}){{ .data = ({}[]){{ {} }}, .len = {} }})",
+                        vec_ty.c_decl(),
+                        elem_c,
                         parts.join(", "),
-                        len
+                        items.len()
                     ),
-                    CType::VecI64,
+                    vec_ty,
                 )
             }
             other => {
@@ -1326,6 +1357,15 @@ impl Codegen {
                 let needle = arg_str(self, 0)?;
                 Ok((format!("lingo_str_ends_with({}, {})", recv_code, needle), CType::Bool))
             }
+            ("split", 1) => {
+                // `s.split(sep)` returns `vec[str]`.  The runtime helper allocs
+                // both the backing array of `const char*` and each piece.
+                let sep = arg_str(self, 0)?;
+                Ok((
+                    format!("lingo_str_split({}, {})", recv_code, sep),
+                    CType::Vec(Box::new(CType::Str)),
+                ))
+            }
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `str.{}` with {} arg(s) is not supported yet \
@@ -1335,18 +1375,22 @@ impl Codegen {
         }
     }
 
-    /// Built-in methods on `vec[i64]`.  Subset for v0.1.12:
+    /// Built-in methods on `vec[T]` for T ∈ {i64, f64, str}.  Subset for v0.1.14:
     ///   - `v.len()`     -> `(v).len`              : i64
-    ///   - `v.get(i)`    -> `(v).data[(i)]`        : i64  (no bounds check yet)
-    ///   - `v.contains(x)` not yet — needs a runtime helper
+    ///   - `v.get(i)`    -> `(v).data[i]`          : T   (no bounds check yet)
     ///   - `v.push/.pop/.set` not yet — need an allocator
     fn gen_vec_method(
         &mut self,
         recv_code: &str,
+        recv_ty: &CType,
         method: &str,
         args: &[Arg],
         span: Span,
     ) -> Result<(String, CType), LingoError> {
+        let elem_ty = match recv_ty {
+            CType::Vec(inner) => (**inner).clone(),
+            _ => unreachable!("gen_vec_method called with non-vec receiver"),
+        };
         match (method, args.len()) {
             ("len", 0) => Ok((format!("({}).len", recv_code), CType::I64)),
             ("get", 1) => {
@@ -1365,7 +1409,7 @@ impl Codegen {
                         args[0].span,
                     ));
                 }
-                Ok((format!("({}).data[(size_t)({})]", recv_code, i_code), CType::I64))
+                Ok((format!("({}).data[(size_t)({})]", recv_code, i_code), elem_ty))
             }
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
@@ -1399,8 +1443,8 @@ impl Codegen {
                     if self.structs.contains_key(id) || self.enums.contains_key(id));
                 if !receiver_is_type_name {
                     let probe = self.gen_expr(receiver)?;
-                    if probe.1 == CType::VecI64 {
-                        return self.gen_vec_method(&probe.0, method, args, span);
+                    if matches!(probe.1, CType::Vec(_)) {
+                        return self.gen_vec_method(&probe.0, &probe.1, method, args, span);
                     }
                     if probe.1 == CType::Str {
                         return self.gen_str_method(&probe.0, method, args, span);
@@ -1551,7 +1595,7 @@ fn debug_fmt_for(t: &CType) -> String {
         CType::Void => "".into(),
         CType::Struct(_) => "<struct>".into(),
         CType::Enum(_) => "<enum>".into(),
-        CType::VecI64 => "<vec>".into(),
+        CType::Vec(_) => "<vec>".into(),
     }
 }
 
@@ -1629,6 +1673,37 @@ static bool lingo_str_ends_with(const char* s, const char* suffix) {
     return memcmp(s + (ls - lsuf), suffix, lsuf) == 0;
 }
 
+/* Split `s` by non-empty `sep` and return a `lingo_vec_str_t` of malloc'd
+ * pieces.  Two passes: first counts, second copies.  Empty `sep` is rejected
+ * (interp splits by codepoint there; we'll add that once we have UTF-8). */
+__attribute__((unused))
+static lingo_vec_str_t lingo_str_split(const char* s, const char* sep) {
+    size_t sep_len = strlen(sep);
+    if (sep_len == 0) {
+        fprintf(stderr, \"lingo: str.split: empty separator not supported yet\\n\");
+        exit(1);
+    }
+    size_t count = 1;
+    const char* p = s;
+    while ((p = strstr(p, sep)) != NULL) { count++; p += sep_len; }
+    const char** arr = (const char**)malloc(count * sizeof(const char*));
+    if (!arr) { fprintf(stderr, \"lingo: oom in str_split\\n\"); exit(1); }
+    const char* start = s;
+    size_t i = 0;
+    while (1) {
+        const char* end = strstr(start, sep);
+        size_t len = end ? (size_t)(end - start) : strlen(start);
+        char* piece = (char*)malloc(len + 1);
+        if (!piece) { fprintf(stderr, \"lingo: oom in str_split\\n\"); exit(1); }
+        memcpy(piece, start, len);
+        piece[len] = '\\0';
+        arr[i++] = piece;
+        if (!end) break;
+        start = end + sep_len;
+    }
+    return (lingo_vec_str_t){ .data = arr, .len = (int64_t)count };
+}
+
 /* Two-pass snprintf into a fresh heap buffer.  Returned `const char*` leaks
  * on purpose (see note above).  Used by the f-string lowering. */
 __attribute__((unused))
@@ -1655,7 +1730,10 @@ static const char* lingo_fmt_alloc(const char* fmt, ...) {
     // we emit is <math.h>; if that changes, update this marker too.
     // Marker must match the *exact* trailing chunk of the prelude in `gen_program`.
     // If you add/reorder #includes there, update this string too.
-    let marker = "#include <math.h>\n#include <stddef.h>\n#include <string.h>\n#include <stdlib.h>\n#include <stdarg.h>\n\n";
+    // Marker is the chunk at the *end* of the prelude block, right after which
+    // the helper splice goes — and crucially, the splice goes *after* the
+    // `lingo_vec_<T>_t` typedefs (because the helpers reference them).
+    let marker = "typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\ntypedef struct { const double*  data; int64_t len; } lingo_vec_f64_t;\ntypedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\n\n";
     Ok(match core.find(marker) {
         Some(idx) => {
             let split = idx + marker.len();
