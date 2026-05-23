@@ -7,8 +7,8 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.6 — bootstrap interpreter is *usable*. 12/12 integration tests green.
-> structs / enums / match / vec / map / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work.
+> ⚠️ **status:** v0.1.7 — bootstrap interpreter + a *working C backend*. 15/15 integration tests green.
+> structs / enums / match / vec / map / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a subset compiles to native via the C backend (≈2300× faster on `fib(35)`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
 
@@ -26,7 +26,12 @@ cargo run --release -- ../examples/fib.lingo
 # 0 1 1 2 3 5 8 13 21 34   (one per line)
 
 cargo test
-# 12 passed; 0 failed
+# 15 passed; 0 failed
+
+# compile to a native binary via the C backend:
+cargo run --release -- build examples/fib.lingo
+./fib
+# 0 1 1 2 3 5 8 13 21 34
 
 # guided tour of every v0.1.5 feature:
 cargo run --release -- examples/tour.lingo
