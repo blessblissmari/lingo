@@ -27,6 +27,9 @@ pub enum Value {
     Str(String),
     Range(i64, i64),
     Vec_(Rc<RefCell<Vec<Value>>>),
+    /// Map with string-like keys (we store the key's display form so any value works).
+    /// Entry insertion order is preserved.
+    Map_(Rc<RefCell<Vec<(Value, Value)>>>),
     /// Wrapped return value from a fallible fn: Ok(v) or Err(e).
     /// Unwrapped by `?` or by `match`.
     Result_(Rc<std::result::Result<Value, Value>>),
@@ -51,6 +54,7 @@ impl Value {
             Value::Str(_) => "str".into(),
             Value::Range(_, _) => "range".into(),
             Value::Vec_(_) => "vec".into(),
+            Value::Map_(_) => "map".into(),
             Value::Result_(_) => "result".into(),
             Value::Struct { type_name, .. } => type_name.clone(),
             Value::Enum { type_name, .. } => type_name.clone(),
@@ -68,6 +72,11 @@ impl Value {
             Value::Vec_(rc) => {
                 let parts: Vec<String> = rc.borrow().iter().map(|v| v.display()).collect();
                 format!("vec[{}]", parts.join(", "))
+            }
+            Value::Map_(rc) => {
+                let parts: Vec<String> = rc.borrow().iter()
+                    .map(|(k, v)| format!("{}: {}", k.display(), v.display())).collect();
+                format!("map{{{}}}", parts.join(", "))
             }
             Value::Result_(r) => match r.as_ref() {
                 Ok(v) => format!("ok({})", v.display()),
@@ -834,6 +843,44 @@ impl Interp {
                 }
                 Ok(Value::Vec_(Rc::new(RefCell::new(vals))))
             }
+            ExprKind::MapLit(entries) => {
+                let mut out: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                for (ke, ve) in entries {
+                    let k = self.eval(ke)?;
+                    if self.pending_raise.is_some() { return Ok(Value::None_); }
+                    let v = self.eval(ve)?;
+                    if self.pending_raise.is_some() { return Ok(Value::None_); }
+                    // de-dup: if the key already exists (by structural equality), overwrite.
+                    let mut replaced = false;
+                    for slot in out.iter_mut() {
+                        if values_eq(&slot.0, &k) {
+                            slot.1 = v.clone();
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if !replaced {
+                        out.push((k, v));
+                    }
+                }
+                Ok(Value::Map_(Rc::new(RefCell::new(out))))
+            }
+            ExprKind::FString(parts) => {
+                let mut s = String::new();
+                for p in parts {
+                    match p {
+                        FStringPart::Lit(lit) => s.push_str(lit),
+                        FStringPart::Expr(inner) => {
+                            let v = self.eval(inner)?;
+                            if self.pending_raise.is_some() {
+                                return Ok(Value::None_);
+                            }
+                            s.push_str(&v.display());
+                        }
+                    }
+                }
+                Ok(Value::Str(s))
+            }
             ExprKind::Try(inner) => {
                 let v = self.eval(inner)?;
                 if self.pending_raise.is_some() {
@@ -1142,6 +1189,68 @@ impl Interp {
                     (m, n) => Err(LingoError::new(
                         Stage::Runtime,
                         format!("no method `str.{}` with {} arg(s) (known: len/contains/starts_with/ends_with/to_lower/to_upper/trim/split/replace)", m, n),
+                        call_span,
+                    )),
+                }
+            }
+            Value::Map_(rc) => {
+                let vals = eval_positional(self, args)?;
+                match (method, vals.len()) {
+                    ("len", 0) => Ok(Some(Value::Int(rc.borrow().len() as i64))),
+                    ("has", 1) => {
+                        let key = &vals[0];
+                        let found = rc.borrow().iter().any(|(k, _)| values_eq(k, key));
+                        Ok(Some(Value::Bool(found)))
+                    }
+                    ("get", 1) => {
+                        let key = &vals[0];
+                        let borrow = rc.borrow();
+                        for (k, v) in borrow.iter() {
+                            if values_eq(k, key) {
+                                return Ok(Some(v.clone()));
+                            }
+                        }
+                        Ok(Some(Value::None_))
+                    }
+                    ("set", 2) => {
+                        let mut it = vals.into_iter();
+                        let key = it.next().unwrap();
+                        let val = it.next().unwrap();
+                        let mut borrow = rc.borrow_mut();
+                        for slot in borrow.iter_mut() {
+                            if values_eq(&slot.0, &key) {
+                                slot.1 = val;
+                                return Ok(Some(Value::None_));
+                            }
+                        }
+                        borrow.push((key, val));
+                        Ok(Some(Value::None_))
+                    }
+                    ("remove", 1) => {
+                        let key = &vals[0];
+                        let mut borrow = rc.borrow_mut();
+                        if let Some(pos) = borrow.iter().position(|(k, _)| values_eq(k, key)) {
+                            borrow.remove(pos);
+                            Ok(Some(Value::Bool(true)))
+                        } else {
+                            Ok(Some(Value::Bool(false)))
+                        }
+                    }
+                    ("keys", 0) => {
+                        let ks: Vec<Value> = rc.borrow().iter().map(|(k, _)| k.clone()).collect();
+                        Ok(Some(Value::Vec_(Rc::new(RefCell::new(ks)))))
+                    }
+                    ("values", 0) => {
+                        let vs: Vec<Value> = rc.borrow().iter().map(|(_, v)| v.clone()).collect();
+                        Ok(Some(Value::Vec_(Rc::new(RefCell::new(vs)))))
+                    }
+                    ("clear", 0) => {
+                        rc.borrow_mut().clear();
+                        Ok(Some(Value::None_))
+                    }
+                    (m, n) => Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("no method `map.{}` with {} arg(s) (known: len/has/get/set/remove/keys/values/clear)", m, n),
                         call_span,
                     )),
                 }
