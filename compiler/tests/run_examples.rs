@@ -195,6 +195,14 @@ fn c_backend_hello_native() {
 }
 
 #[test]
+fn c_backend_vec_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("vec_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("vec_native.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
 fn c_backend_fib_native_matches_interp() {
     let Some((native_out, stderr, code)) = run_native("fib.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
