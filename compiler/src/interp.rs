@@ -133,6 +133,8 @@ pub struct Interp {
     /// Set by `?` when the inner result is Err. The next statement boundary
     /// converts this into a `Flow::Raise(...)` so it propagates to the caller.
     pending_raise: Option<Value>,
+    /// Command-line args passed to the `lingo` binary, available via `args()`.
+    argv: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -154,7 +156,15 @@ impl Interp {
             methods: HashMap::new(),
             scopes: Vec::new(),
             pending_raise: None,
+            argv: Vec::new(),
         }
+    }
+
+    /// Provide command-line args (everything after the .lingo file path).
+    /// These are visible to lingo code via the `args()` builtin.
+    pub fn with_argv(mut self, argv: Vec<String>) -> Self {
+        self.argv = argv;
+        self
     }
 
     pub fn run_program(&mut self, prog: &Program) -> Result<Value, LingoError> {
@@ -1044,6 +1054,10 @@ impl Interp {
                 ))
             }
         };
+        // built-in free functions
+        if let Some(v) = self.call_builtin_free(&name, args, call_span)? {
+            return Ok(v);
+        }
         let decl = self
             .fns
             .get(&name)
@@ -1060,6 +1074,119 @@ impl Interp {
     }
 
     /// Returns Ok(Some(v)) if `method` is a builtin on `receiver`, Ok(None) if not a builtin.
+    /// Built-in free functions (io, env, conversions). Returns `Ok(None)`
+    /// when the name isn't a builtin so the caller can fall through to user-defined fns.
+    fn call_builtin_free(
+        &mut self,
+        name: &str,
+        args: &[Arg],
+        call_span: Span,
+    ) -> Result<Option<Value>, LingoError> {
+        // helper: enforce all-positional and eval args
+        let positional = |this: &mut Interp| -> Result<Vec<Value>, LingoError> {
+            let mut out = Vec::with_capacity(args.len());
+            for a in args {
+                if a.name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("builtin `{}` takes positional args only", name),
+                        a.span,
+                    ));
+                }
+                out.push(this.eval(&a.value)?);
+                if this.pending_raise.is_some() {
+                    return Ok(out);
+                }
+            }
+            Ok(out)
+        };
+
+        match name {
+            "read_file" => {
+                let vals = positional(self)?;
+                if self.pending_raise.is_some() { return Ok(Some(Value::None_)); }
+                if vals.len() != 1 {
+                    return Err(LingoError::new(Stage::Runtime,
+                        format!("`read_file(path)` expects 1 arg, got {}", vals.len()), call_span));
+                }
+                let path = match &vals[0] {
+                    Value::Str(s) => s.clone(),
+                    v => return Err(LingoError::new(Stage::Runtime,
+                        format!("`read_file` expects str, got {}", v.type_name()), call_span)),
+                };
+                let result = match std::fs::read_to_string(&path) {
+                    Ok(s) => Ok(Value::Str(s)),
+                    Err(e) => Err(Value::Str(format!("read_file({}): {}", path, e))),
+                };
+                Ok(Some(Value::Result_(Rc::new(result))))
+            }
+            "write_file" => {
+                let vals = positional(self)?;
+                if self.pending_raise.is_some() { return Ok(Some(Value::None_)); }
+                if vals.len() != 2 {
+                    return Err(LingoError::new(Stage::Runtime,
+                        format!("`write_file(path, contents)` expects 2 args, got {}", vals.len()), call_span));
+                }
+                let path = match &vals[0] {
+                    Value::Str(s) => s.clone(),
+                    v => return Err(LingoError::new(Stage::Runtime,
+                        format!("`write_file` path must be str, got {}", v.type_name()), call_span)),
+                };
+                let contents = match &vals[1] {
+                    Value::Str(s) => s.clone(),
+                    v => return Err(LingoError::new(Stage::Runtime,
+                        format!("`write_file` contents must be str, got {}", v.type_name()), call_span)),
+                };
+                let result: std::result::Result<Value, Value> = match std::fs::write(&path, contents) {
+                    Ok(()) => Ok(Value::None_),
+                    Err(e) => Err(Value::Str(format!("write_file({}): {}", path, e))),
+                };
+                Ok(Some(Value::Result_(Rc::new(result))))
+            }
+            "args" => {
+                let vals = positional(self)?;
+                if self.pending_raise.is_some() { return Ok(Some(Value::None_)); }
+                if !vals.is_empty() {
+                    return Err(LingoError::new(Stage::Runtime,
+                        format!("`args()` takes no arguments, got {}", vals.len()), call_span));
+                }
+                let v: Vec<Value> = self.argv.iter().map(|s| Value::Str(s.clone())).collect();
+                Ok(Some(Value::Vec_(Rc::new(RefCell::new(v)))))
+            }
+            "int" => {
+                // int(str) -> int ! str   — parse a base-10 integer
+                let vals = positional(self)?;
+                if self.pending_raise.is_some() { return Ok(Some(Value::None_)); }
+                if vals.len() != 1 {
+                    return Err(LingoError::new(Stage::Runtime,
+                        format!("`int(x)` expects 1 arg, got {}", vals.len()), call_span));
+                }
+                let result: std::result::Result<Value, Value> = match &vals[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Float(f) => Ok(Value::Int(*f as i64)),
+                    Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                    Value::Str(s) => match s.trim().parse::<i64>() {
+                        Ok(n) => Ok(Value::Int(n)),
+                        Err(_) => Err(Value::Str(format!("int: can't parse {:?}", s))),
+                    },
+                    v => Err(Value::Str(format!("int: can't convert {}", v.type_name()))),
+                };
+                Ok(Some(Value::Result_(Rc::new(result))))
+            }
+            "str" => {
+                // str(x) -> str   — convert any value to its display form
+                let vals = positional(self)?;
+                if self.pending_raise.is_some() { return Ok(Some(Value::None_)); }
+                if vals.len() != 1 {
+                    return Err(LingoError::new(Stage::Runtime,
+                        format!("`str(x)` expects 1 arg, got {}", vals.len()), call_span));
+                }
+                Ok(Some(Value::Str(vals[0].display())))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn call_builtin_method(
         &mut self,
         receiver: &Value,
