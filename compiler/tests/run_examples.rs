@@ -219,6 +219,14 @@ fn c_backend_struct_methods_match_interp() {
 }
 
 #[test]
+fn c_backend_enums_match_interp() {
+    let Some((native_out, stderr, code)) = run_native("enums_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("enums_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+#[test]
 fn io_roundtrip() {
     let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
     assert_eq!(code, 0, "stderr: {stderr}");
