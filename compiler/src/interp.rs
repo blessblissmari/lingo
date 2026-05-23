@@ -292,6 +292,27 @@ impl Interp {
                 Item::Impl(_) | Item::Const(_) | Item::ImplTrait(_) => {}
             }
         }
+        // v0.2.5: if any `impl From[..] for ..:` block is present but the
+        // user didn't declare `trait From[E]:`, synthesize the built-in
+        // trait so the general impl-resolution path can validate it
+        // uniformly with user-defined generic traits.  Note the synthetic
+        // trait carries no method bodies — it exists only to drive
+        // arity-checking and the `from_impls` denormalized view.
+        let needs_synthetic_from = prog.items.iter().any(|it| matches!(
+            it,
+            Item::ImplTrait(b) if b.trait_name == "From"
+        )) && !self.traits.contains_key("From");
+        if needs_synthetic_from {
+            self.traits.insert(
+                "From".into(),
+                TraitDecl {
+                    name: "From".into(),
+                    type_params: vec!["E".into()],
+                    methods: Vec::new(),
+                    span: Span::new(0, 0),
+                },
+            );
+        }
         // second pass: register impl methods and evaluate consts
         for item in &prog.items {
             match item {
@@ -327,22 +348,43 @@ impl Interp {
                     self.consts.insert(c.name.clone(), v);
                 }
                 Item::ImplTrait(b) => {
-                    // v0.2.3: built-in `From[E1] for E2` — magic trait, no
-                    // user-visible `trait From` declaration needed. Register
-                    // the `from` method into a (E1_ty, E2_ty)-keyed table the
-                    // `?` operator consults when types mismatch.
+                    // v0.2.5: every `impl Trait[..] for Target:` now goes
+                    // through the general path.  The trait must exist
+                    // (`From` is auto-synthesized above when needed) and
+                    // the bracketed `trait_args` must match the trait's
+                    // declared `type_params` arity.  After validation,
+                    // `From`-impls additionally populate the denormalized
+                    // `from_impls` lookup table the `?` operator consults
+                    // when err types mismatch.
+                    let trait_decl = self.traits.get(&b.trait_name).cloned().ok_or_else(|| {
+                        LingoError::new(
+                            Stage::Resolve,
+                            format!("`impl {} for {}` refers to unknown trait `{}`",
+                                    b.trait_name, b.target, b.trait_name),
+                            b.span,
+                        )
+                    })?;
+                    if b.trait_args.len() != trait_decl.type_params.len() {
+                        let want = trait_decl.type_params.len();
+                        let got = b.trait_args.len();
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            if want == 0 {
+                                format!("trait `{}` takes no type parameters, but impl provided {} (`[{}]`)",
+                                        b.trait_name, got, b.trait_args.join(", "))
+                            } else {
+                                format!("trait `{}` declares {} type parameter(s) ({}); impl provided {}",
+                                        b.trait_name, want, trait_decl.type_params.join(", "), got)
+                            },
+                            b.span,
+                        ));
+                    }
+                    // v0.2.5: `From`-specific bookkeeping piggybacks on the
+                    // general path.  Validate the single method shape and
+                    // register it into `from_impls` for `?` to find.
                     if b.trait_name == "From" {
-                        if b.trait_args.len() != 1 {
-                            return Err(LingoError::new(
-                                Stage::Resolve,
-                                format!("`impl From[..] for {}` expects exactly one type arg, got {}",
-                                        b.target, b.trait_args.len()),
-                                b.span,
-                            ));
-                        }
                         let from_ty = b.trait_args[0].clone();
                         let to_ty = b.target.clone();
-                        // exactly one method, named `from`, taking (e: from_ty) -> to_ty
                         if b.methods.len() != 1 || b.methods[0].name != "from" {
                             return Err(LingoError::new(
                                 Stage::Resolve,
@@ -360,23 +402,6 @@ impl Interp {
                         self.from_impls.insert((from_ty, to_ty), b.methods[0].clone());
                         continue;
                     }
-                    if !b.trait_args.is_empty() {
-                        return Err(LingoError::new(
-                            Stage::Resolve,
-                            format!("trait `{}` does not take type args (only the built-in `From` does in v0.2.3)",
-                                    b.trait_name),
-                            b.span,
-                        ));
-                    }
-                    // The trait must exist.
-                    let trait_decl = self.traits.get(&b.trait_name).cloned().ok_or_else(|| {
-                        LingoError::new(
-                            Stage::Resolve,
-                            format!("`impl {} for {}` refers to unknown trait `{}`",
-                                    b.trait_name, b.target, b.trait_name),
-                            b.span,
-                        )
-                    })?;
                     // The target type must exist (struct or enum).
                     if !self.structs.contains_key(&b.target) && !self.enums.contains_key(&b.target) {
                         return Err(LingoError::new(

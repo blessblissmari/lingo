@@ -298,6 +298,32 @@ impl Parser {
             Tok::Ident(s) => s,
             _ => unreachable!(),
         };
+        // v0.2.5: optional generic type params — `trait Encoder[T]:`,
+        // `trait Pair[A, B]:`.  Each param introduces a type name that
+        // can appear in trait method signatures and gets substituted
+        // from the corresponding `impl Trait[A1, A2] for Target:` arg.
+        let mut type_params: Vec<String> = Vec::new();
+        if self.eat(Tok::LBracket) {
+            loop {
+                let p_tok = self.expect(Tok::Ident("".into()), "type-parameter name")?;
+                let p = match p_tok.tok {
+                    Tok::Ident(s) => s,
+                    _ => unreachable!(),
+                };
+                if type_params.contains(&p) {
+                    return Err(LingoError::new(
+                        Stage::Parse,
+                        format!("duplicate type parameter `{}` on trait `{}`", p, name),
+                        p_tok.span,
+                    ));
+                }
+                type_params.push(p);
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RBracket, "`]` after trait type params")?;
+        }
         self.expect(Tok::Colon, "`:`")?;
         self.expect(Tok::Newline, "newline")?;
         self.skip_newlines();
@@ -315,6 +341,7 @@ impl Parser {
         self.expect(Tok::Dedent, "dedent")?;
         Ok(TraitDecl {
             name,
+            type_params,
             methods,
             span: Span::new(start, end),
         })

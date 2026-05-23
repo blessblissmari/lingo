@@ -35,6 +35,14 @@ pub enum Item {
 #[derive(Debug, Clone)]
 pub struct TraitDecl {
     pub name: String,
+    /// Optional generic type parameters: `trait Encoder[T]:` parses with
+    /// `type_params = ["T"]`. v0.2.5 — type params substitute into method
+    /// signatures (`T`, `Self`) at impl conformance checking time; the
+    /// impl supplies one concrete type per param in its `[..]` brackets.
+    /// The built-in `From` trait is registered synthetically with
+    /// `type_params = ["E"]` if any `impl From[..] for ..:` is seen
+    /// without a user-visible declaration.
+    pub type_params: Vec<String>,
     /// Required method signatures (no body) + optional default-impl methods (with body).
     pub methods: Vec<TraitMethod>,
     pub span: Span,
@@ -51,11 +59,13 @@ pub struct TraitMethod {
 pub struct ImplTraitBlock {
     pub trait_name: String,
     /// Optional generic-args between brackets after the trait name —
-    /// `impl From[str] for ParseErr:` parses with `trait_args = ["str"]`.
-    /// v0.2.3 only uses this for the built-in `From` "trait" (which has
-    /// no user-visible `trait` declaration); regular `trait` impls
-    /// must leave this empty.  Each element is a type name (no nesting
-    /// for now — `From[map[str, int]]` and friends are deferred).
+    /// `impl From[str] for ParseErr:` parses with `trait_args = ["str"]`,
+    /// `impl Encoder[int] for IntEnc:` parses with `trait_args = ["int"]`.
+    /// v0.2.5: must match the trait's declared `type_params` arity. The
+    /// resolver substitutes `type_params[i] -> trait_args[i]` (and `Self`
+    /// -> `target`) when checking impl conformance. Each element is a
+    /// type name (no nesting for now — `Encoder[map[str, int]]` and
+    /// friends are deferred).
     pub trait_args: Vec<String>,
     pub target: String,
     pub methods: Vec<FnDecl>,
