@@ -228,6 +228,16 @@ print(double(7))
 }
 
 #[test]
+fn c_backend_words_native_matches_interp() {
+    // v0.1.24 unlock: print(vec[T]) rendering + backwards inference for
+    // `let mut x = vec[]` without an annotation.
+    let Some((native_out, stderr, code)) = run_native("words.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("words.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+#[test]
 fn c_backend_str_methods_native_matches_interp() {
     let Some((native_out, stderr, code)) = run_native("str_methods_native.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
