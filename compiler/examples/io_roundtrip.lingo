@@ -1,0 +1,21 @@
+# io builtins: `write_file`, `read_file`, `args()`.
+# Both io fns return `T ! str` — propagate failures with `?`,
+# handle them with `match ok(v) / err(e)`.
+
+fn echo_back(path: str, msg: str) -> str ! str:
+    let written = write_file(path, msg)?
+    let read = read_file(path)?
+    return read
+
+fn main():
+    let argv = args()
+    let path = "/tmp/lingo_io_demo.txt"
+
+    let payload = f"hello from lingo, {argv.len()} arg(s) passed in"
+
+    match echo_back(path, payload):
+        ok(content):
+            print(f"wrote and read back {content.len()} bytes")
+            print(content)
+        err(msg):
+            print(f"io failed: {msg}")
