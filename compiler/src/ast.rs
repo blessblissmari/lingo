@@ -205,7 +205,15 @@ pub enum ExprKind {
         fields: Vec<(String, Expr)>,
     },
     VecLit(Vec<Expr>),
+    MapLit(Vec<(Expr, Expr)>),
+    FString(Vec<FStringPart>),
     Try(Box<Expr>), // postfix `?` — propagate error from a fallible call
+}
+
+#[derive(Debug, Clone)]
+pub enum FStringPart {
+    Lit(String),
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone)]
