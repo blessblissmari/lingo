@@ -262,6 +262,11 @@ impl Parser {
         } else {
             None
         };
+        let raises = if self.eat(Tok::Bang) {
+            Some(self.type_ref()?)
+        } else {
+            None
+        };
         self.expect(Tok::Colon, "`:` to start function body")?;
         let body = self.block()?;
         let end = body.span.end;
@@ -269,6 +274,7 @@ impl Parser {
             name,
             params,
             return_type,
+            raises,
             body,
             span: Span::new(start, end),
         })
@@ -370,6 +376,7 @@ impl Parser {
         match self.peek_tok() {
             Tok::Let => self.let_stmt(),
             Tok::Return => self.return_stmt(),
+            Tok::Raise => self.raise_stmt(),
             Tok::If => self.if_stmt(),
             Tok::For => self.for_stmt(),
             Tok::Match => self.match_stmt(),
@@ -470,6 +477,7 @@ impl Parser {
         // a single statement on the same line as `pattern:`
         match self.peek_tok() {
             Tok::Return => self.return_stmt(),
+            Tok::Raise => self.raise_stmt(),
             Tok::Break => {
                 let span = self.advance().span;
                 self.expect(Tok::Newline, "newline")?;
@@ -640,6 +648,15 @@ impl Parser {
             value,
             span: Span::new(start, end),
         })
+    }
+
+    fn raise_stmt(&mut self) -> Result<Stmt, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Raise, "`raise`")?;
+        let value = self.expr()?;
+        let end = value.span.end;
+        self.expect(Tok::Newline, "newline")?;
+        Ok(Stmt::Raise { value, span: Span::new(start, end) })
     }
 
     fn if_stmt(&mut self) -> Result<Stmt, LingoError> {
@@ -877,6 +894,13 @@ impl Parser {
                 let span = Span::new(e.span.start, name_tok.span.end);
                 e = Expr {
                     kind: ExprKind::Field(Box::new(e), name),
+                    span,
+                };
+            } else if self.at(Tok::Question) {
+                let q = self.advance();
+                let span = Span::new(e.span.start, q.span.end);
+                e = Expr {
+                    kind: ExprKind::Try(Box::new(e)),
                     span,
                 };
             } else {
