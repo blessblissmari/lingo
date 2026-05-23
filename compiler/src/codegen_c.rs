@@ -700,7 +700,7 @@ impl Codegen {
                 if i > 0 {
                     s.push_str(", ");
                 }
-                write!(s, "{} {}", params[i].c_decl(), p.name).unwrap();
+                write!(s, "{} {}", params[i].c_decl(), c_local_ident(&p.name)).unwrap();
             }
         }
         s.push(')');
@@ -970,7 +970,7 @@ impl Codegen {
                         *span,
                     ));
                 }
-                writeln!(self.body, "{}{} {} = {};", self.pad(), decl_ty.c_decl(), name, code).unwrap();
+                writeln!(self.body, "{}{} {} = {};", self.pad(), decl_ty.c_decl(), c_local_ident(name), code).unwrap();
                 self.scopes.last_mut().unwrap().insert(name.clone(), decl_ty);
             }
             Stmt::Assign { target, value, span } => {
@@ -985,7 +985,7 @@ impl Codegen {
                     }
                 };
                 let (code, _) = self.gen_expr(value)?;
-                writeln!(self.body, "{}{} = {};", self.pad(), name, code).unwrap();
+                writeln!(self.body, "{}{} = {};", self.pad(), c_local_ident(&name), code).unwrap();
             }
             Stmt::Return { value, span: _ } => {
                 if let Some(raises) = &self.current_fn_raises.clone() {
@@ -1063,6 +1063,7 @@ impl Codegen {
                     ExprKind::Range(a, b) => {
                         let (lo_code, _) = self.gen_expr(a)?;
                         let (hi_code, _) = self.gen_expr(b)?;
+                        let var = c_local_ident(var);
                         writeln!(self.body,
                             "{}for (int64_t {var} = {lo_code}; {var} < {hi_code}; ++{var}) {{",
                             self.pad()).unwrap();
@@ -1093,9 +1094,10 @@ impl Codegen {
                                     "{}for (int64_t __ix_{ix} = 0; __ix_{ix} < {tmp}.len; ++__ix_{ix}) {{",
                                     self.pad(), ix = ix).unwrap();
                                 self.indent += 1;
+                                let var_c = c_local_ident(var);
                                 writeln!(self.body,
                                     "{}{} {var} = {tmp}.data[__ix_{ix}];",
-                                    self.pad(), elem_c, ix = ix).unwrap();
+                                    self.pad(), elem_c, ix = ix, var = var_c).unwrap();
                                 self.scopes.push(HashMap::new());
                                 self.scopes.last_mut().unwrap().insert(var.clone(), elem_ty);
                                 for s in &body.stmts { self.emit_stmt(s)?; }
@@ -1129,7 +1131,7 @@ impl Codegen {
                                                      __chbuf_{n}[__k_{n}] = __s_{n}[__i_{n} + (size_t)__k_{n}];",
                                          self.pad(), n=n).unwrap();
                                 writeln!(self.body, "{}const char* {var} = __chbuf_{n};",
-                                         self.pad(), var=var, n=n).unwrap();
+                                         self.pad(), var=c_local_ident(var), n=n).unwrap();
                                 self.scopes.push(HashMap::new());
                                 self.scopes.last_mut().unwrap().insert(var.clone(), CType::Str);
                                 for s in &body.stmts { self.emit_stmt(s)?; }
@@ -1254,7 +1256,7 @@ impl Codegen {
                                     Some(&self.enums),
                                 )?;
                                 writeln!(self.body, "{}{} {} = {}.as.{}._{};",
-                                         self.pad(), ty.c_decl(), name, tmp, variant, i).unwrap();
+                                         self.pad(), ty.c_decl(), c_local_ident(name), tmp, variant, i).unwrap();
                                 self.scopes.last_mut().unwrap().insert(name.clone(), ty);
                             }
                             _ => {
@@ -1293,7 +1295,7 @@ impl Codegen {
                     self.indent += 1;
                     self.scopes.push(HashMap::new());
                     writeln!(self.body, "{}{} {} = {};",
-                             self.pad(), enum_name, name, tmp).unwrap();
+                             self.pad(), enum_name, c_local_ident(name), tmp).unwrap();
                     self.scopes.last_mut().unwrap().insert(name.clone(), CType::Enum(enum_name.clone()));
                     for s in &arm.body.stmts {
                         self.emit_stmt(s)?;
@@ -1376,7 +1378,7 @@ impl Codegen {
                     self.indent += 1;
                     self.scopes.push(HashMap::new());
                     writeln!(self.body, "{}{} {} = {};",
-                             self.pad(), res_ty.c_decl(), name, tmp).unwrap();
+                             self.pad(), res_ty.c_decl(), c_local_ident(name), tmp).unwrap();
                     self.scopes.last_mut().unwrap().insert(name.clone(), res_ty.clone());
                     for s in &arm.body.stmts { self.emit_stmt(s)?; }
                     self.scopes.pop();
@@ -1409,8 +1411,9 @@ impl Codegen {
                             match &sub[0] {
                                 Pattern::Wildcard(_) => {}
                                 Pattern::Bind(bname, _) => {
+                                    let mb = c_local_ident(bname);
                                     writeln!(self.body, "{}{} {} = {}.ok; (void){};",
-                                             self.pad(), t.c_decl(), bname, tmp, bname).unwrap();
+                                             self.pad(), t.c_decl(), mb, tmp, mb).unwrap();
                                     self.scopes.last_mut().unwrap().insert(bname.clone(), t.clone());
                                 }
                                 _ => return Err(LingoError::new(
@@ -1451,7 +1454,7 @@ impl Codegen {
                                     self.indent += 1;
                                     self.scopes.push(HashMap::new());
                                     writeln!(self.body, "{}{} {} = {}.err;",
-                                             self.pad(), e.c_decl(), bname, tmp).unwrap();
+                                             self.pad(), e.c_decl(), c_local_ident(bname), tmp).unwrap();
                                     self.scopes.last_mut().unwrap().insert(bname.clone(), e.clone());
                                     for s in &arm.body.stmts { self.emit_stmt(s)?; }
                                     self.scopes.pop();
@@ -1499,7 +1502,7 @@ impl Codegen {
                                                     Some(&self.enums),
                                                 )?;
                                                 writeln!(self.body, "{}{} {} = {}.err.as.{}._{};",
-                                                         self.pad(), pty.c_decl(), bname, tmp, v_name, i).unwrap();
+                                                         self.pad(), pty.c_decl(), c_local_ident(bname), tmp, v_name, i).unwrap();
                                                 self.scopes.last_mut().unwrap().insert(bname.clone(), pty);
                                             }
                                             _ => return Err(LingoError::new(
@@ -1842,7 +1845,7 @@ impl Codegen {
                         e.span,
                     )
                 })?;
-                (name.clone(), ty)
+                (c_local_ident(name), ty)
             }
             ExprKind::Unary(op, x) => {
                 let (code, ty) = self.gen_expr(x)?;
@@ -2388,7 +2391,7 @@ impl Codegen {
         // For `m.set(...)` we need `&m`, i.e. the receiver must be an
         // addressable lvalue.  v0.1.15 only allows a plain identifier.
         let recv_ident = if let ExprKind::Ident(name) = &recv.kind {
-            Some(name.clone())
+            Some(c_local_ident(name))
         } else {
             None
         };
@@ -2499,7 +2502,7 @@ impl Codegen {
         // Mutating methods need an addressable lvalue.  We only allow a
         // plain identifier as the receiver (same restriction as `map.set`).
         let recv_ident = if let ExprKind::Ident(name) = &recv.kind {
-            Some(name.clone())
+            Some(c_local_ident(name))
         } else {
             None
         };
@@ -2808,6 +2811,39 @@ impl Codegen {
 /// printf format specifier we use when debug-printing a value inside a struct
 /// or enum payload — same idea as `CType::printf_fmt` but always quoting strings
 /// (we want `Pt{name="foo"}`, not `Pt{name=foo}`).
+/// v0.1.25: mangle a lingo local identifier to a safe C identifier.
+/// If the name clashes with a C99/C11 reserved keyword (or a few common
+/// system identifiers we use in the runtime), we prefix it with `l_`.
+/// Otherwise we return the name unchanged so the generated code stays
+/// readable.  Apply this everywhere a local *variable* name (let,
+/// assign, ident lookup, for-loop iter binding, fn param, match bind)
+/// hits the C output — but NOT to struct/enum/field/fn names, which
+/// are namespaced or already mangled elsewhere.
+fn c_local_ident(name: &str) -> String {
+    const RESERVED: &[&str] = &[
+        // C99 / C11 keywords
+        "auto","break","case","char","const","continue","default","do",
+        "double","else","enum","extern","float","for","goto","if","inline",
+        "int","long","register","restrict","return","short","signed",
+        "sizeof","static","struct","switch","typedef","union","unsigned",
+        "void","volatile","while",
+        "_Bool","_Complex","_Imaginary","_Alignas","_Alignof","_Atomic",
+        "_Generic","_Noreturn","_Static_assert","_Thread_local",
+        // C++ reserved (lingo targets C99 but some compilers in -Wall lint these)
+        "bool","true","false","class","new","delete","this","try","catch",
+        "throw","template","typename","namespace","using","public","private",
+        "protected","virtual","operator","friend",
+        // Names we use in our generated runtime / prelude
+        "stdin","stdout","stderr","malloc","free","printf","fprintf","exit",
+        "main",
+    ];
+    if RESERVED.contains(&name) {
+        format!("l_{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
 fn debug_fmt_for(t: &CType) -> String {
     match t {
         CType::I64 => "%\" PRId64 \"".into(),
