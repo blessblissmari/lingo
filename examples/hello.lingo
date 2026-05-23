@@ -1,0 +1,4 @@
+# the obligatory hello world.
+# `fn main()` is the entry point. `print` is in the prelude.
+fn main():
+    print("hello, lingo")
