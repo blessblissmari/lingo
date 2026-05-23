@@ -146,6 +146,10 @@ pub struct Codegen {
     scopes: Vec<HashMap<String, CType>>,
     /// How deep are we indented in the current C function body?
     indent: usize,
+    /// Monotonically increasing counter for synthesized temporaries
+    /// (`__pr_<N>` in debug prints, `__match_<N>` in match lowering).
+    /// Reset per function in `emit_fn_body` to keep names short and readable.
+    tmp_counter: usize,
 }
 
 impl Codegen {
@@ -160,6 +164,7 @@ impl Codegen {
             enums: HashMap::new(),
             scopes: Vec::new(),
             indent: 0,
+            tmp_counter: 0,
         }
     }
 
@@ -408,6 +413,7 @@ impl Codegen {
         let proto = self.fn_proto(c_name, f)?;
         writeln!(self.body, "{} {{", proto).unwrap();
         self.indent = 1;
+        self.tmp_counter = 0;
         self.scopes.push(HashMap::new());
         let (params, _) = self.fn_sigs.get(c_name).cloned().unwrap();
         for (i, p) in f.params.iter().enumerate() {
@@ -571,7 +577,8 @@ impl Codegen {
             }
         };
         // Stash scrutinee into a local so subpattern bindings can reference it.
-        let tmp = format!("__match_{}", self.indent);
+        let tmp = format!("__match_{}", self.tmp_counter);
+        self.tmp_counter += 1;
         writeln!(self.body, "{}{} {} = {};", self.pad(), enum_name, tmp, scrut_code).unwrap();
         writeln!(self.body, "{}switch ({}.tag) {{", self.pad(), tmp).unwrap();
         let mut had_default = false;
@@ -696,6 +703,8 @@ impl Codegen {
     fn emit_print(&mut self, args: &[Arg], span: Span) -> Result<(), LingoError> {
         // Build a single printf("fmt", ...). Multiple args separated by spaces,
         // newline at end. Bool values are converted to "true"/"false" strings.
+        // Struct and enum values get auto-generated debug formats so
+        // `print(point)` Just Works — same intent as Rust's `{:?}`.
         let mut fmt = String::new();
         let mut vals: Vec<String> = Vec::new();
         for (i, a) in args.iter().enumerate() {
@@ -710,12 +719,97 @@ impl Codegen {
                 fmt.push(' ');
             }
             let (code, ty) = self.gen_expr(&a.value)?;
-            fmt.push_str(ty.printf_fmt());
-            match ty {
-                CType::Bool => vals.push(format!("(({}) ? \"true\" : \"false\")", code)),
-                _ => vals.push(code),
+            match &ty {
+                CType::Bool => {
+                    fmt.push_str("%s");
+                    vals.push(format!("(({}) ? \"true\" : \"false\")", code));
+                }
+                CType::Struct(name) => {
+                    let fields = self.structs.get(name).cloned().ok_or_else(|| {
+                        LingoError::new(Stage::Resolve,
+                            format!("C backend: struct `{}` not registered", name), a.span)
+                    })?;
+                    // `Name{f1=<fmt>, f2=<fmt>}` — bind the struct to a temp so
+                    // we evaluate the expression exactly once even if it has side effects.
+                    let tmp = format!("__pr_{}_{}", name, self.tmp_counter);
+                    self.tmp_counter += 1;
+                    writeln!(self.body, "{}{} {} = {};", self.pad(), name, tmp, code).unwrap();
+                    fmt.push_str(name);
+                    fmt.push('{');
+                    for (fi, (fname, fty)) in fields.iter().enumerate() {
+                        if fi > 0 { fmt.push_str(", "); }
+                        fmt.push_str(fname);
+                        fmt.push_str(": ");
+                        fmt.push_str(&debug_fmt_for(fty));
+                        vals.push(debug_val_for(fty, &format!("{}.{}", tmp, fname)));
+                    }
+                    fmt.push('}');
+                }
+                CType::Enum(name) => {
+                    let decl = self.enums.get(name).cloned().ok_or_else(|| {
+                        LingoError::new(Stage::Resolve,
+                            format!("C backend: enum `{}` not registered", name), a.span)
+                    })?;
+                    // Switch on the tag at print time; emit a small helper expression
+                    // via a comma'd block using a `__match` temp.  We unroll into the
+                    // printf by emitting it now and finishing the rest of the format
+                    // separately — so the enum becomes a self-contained printf line.
+                    if !fmt.is_empty() {
+                        // flush the partial line so the enum can stand alone
+                        // (keeps the printf logic linear)
+                        if vals.is_empty() {
+                            writeln!(self.body, "{}printf(\"{}\");", self.pad(), fmt).unwrap();
+                        } else {
+                            writeln!(self.body, "{}printf(\"{}\", {});",
+                                     self.pad(), fmt, vals.join(", ")).unwrap();
+                        }
+                        fmt.clear();
+                        vals.clear();
+                    }
+                    let tmp = format!("__pr_{}_{}", name, self.tmp_counter);
+                    self.tmp_counter += 1;
+                    writeln!(self.body, "{}{} {} = {};", self.pad(), name, tmp, code).unwrap();
+                    writeln!(self.body, "{}switch ({}.tag) {{", self.pad(), tmp).unwrap();
+                    for v in &decl.variants {
+                        writeln!(self.body, "{}    case {}_{}_TAG: {{",
+                                 self.pad(), name, v.name).unwrap();
+                        let mut inner_fmt = format!("{}.{}", name, v.name);
+                        let mut inner_vals: Vec<String> = Vec::new();
+                        if !v.payload.is_empty() {
+                            inner_fmt.push('(');
+                            for (pi, p) in v.payload.iter().enumerate() {
+                                if pi > 0 { inner_fmt.push_str(", "); }
+                                let pty = map_type_with(p, v.span, Some(&self.structs), Some(&self.enums))?;
+                                inner_fmt.push_str(&debug_fmt_for(&pty));
+                                inner_vals.push(debug_val_for(&pty, &format!("{}.as.{}._{}", tmp, v.name, pi)));
+                            }
+                            inner_fmt.push(')');
+                        }
+                        // Trailing space if this isn't the last printed arg; newline
+                        // at the end is added below when the loop finishes.
+                        if i + 1 < args.len() {
+                            inner_fmt.push(' ');
+                        }
+                        if inner_vals.is_empty() {
+                            writeln!(self.body, "{}        printf(\"{}\");",
+                                     self.pad(), inner_fmt).unwrap();
+                        } else {
+                            writeln!(self.body, "{}        printf(\"{}\", {});",
+                                     self.pad(), inner_fmt, inner_vals.join(", ")).unwrap();
+                        }
+                        writeln!(self.body, "{}        break;", self.pad()).unwrap();
+                        writeln!(self.body, "{}    }}", self.pad()).unwrap();
+                    }
+                    writeln!(self.body, "{}    default: __builtin_unreachable();", self.pad()).unwrap();
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                }
+                _ => {
+                    fmt.push_str(ty.printf_fmt());
+                    vals.push(code);
+                }
             }
         }
+        // Trailing newline for whatever's left in the buffer.
         fmt.push_str("\\n");
         let _ = span;
         if vals.is_empty() {
@@ -1128,6 +1222,29 @@ impl Codegen {
             parts.push(code);
         }
         Ok((format!("{}({})", mangled, parts.join(", ")), ret))
+    }
+}
+
+/// printf format specifier we use when debug-printing a value inside a struct
+/// or enum payload — same idea as `CType::printf_fmt` but always quoting strings
+/// (we want `Pt{name="foo"}`, not `Pt{name=foo}`).
+fn debug_fmt_for(t: &CType) -> String {
+    match t {
+        CType::I64 => "%\" PRId64 \"".into(),
+        CType::U64 => "%\" PRIu64 \"".into(),
+        CType::F64 => "%g".into(),
+        CType::Bool => "%s".into(),
+        CType::Str => "\\\"%s\\\"".into(),
+        CType::Void => "".into(),
+        CType::Struct(_) => "<struct>".into(),
+        CType::Enum(_) => "<enum>".into(),
+    }
+}
+
+fn debug_val_for(t: &CType, code: &str) -> String {
+    match t {
+        CType::Bool => format!("(({}) ? \"true\" : \"false\")", code),
+        _ => code.to_string(),
     }
 }
 
