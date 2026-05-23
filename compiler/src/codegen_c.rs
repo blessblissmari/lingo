@@ -77,8 +77,10 @@ impl CType {
                 CType::I64 => "lingo_vec_i64_t".into(),
                 CType::F64 => "lingo_vec_f64_t".into(),
                 CType::Str => "lingo_vec_str_t".into(),
-                // Unsupported inner types are caught at `map_type_with`, so
-                // hitting this branch means the compiler has a bug.
+                // User struct / enum types get a monomorphized vec typedef +
+                // helpers emitted right after the type itself.
+                CType::Struct(name) | CType::Enum(name) => format!("lingo_vec_{}_t", name),
+                // Unsupported inner types are caught at `map_type_with`.
                 other => panic!("unsupported vec element type in codegen: {:?}", other),
             },
             CType::Map(k, v) => match (k.as_ref(), v.as_ref()) {
@@ -107,6 +109,41 @@ impl CType {
     }
 }
 
+/// Emit a monomorphized `vec[T]` typedef + runtime helpers (new/push/pop/set)
+/// for a user-defined `T` (struct or enum), into `out`.  Called once per
+/// user type — duplicate helpers would conflict at link time.
+fn emit_user_vec_runtime(out: &mut String, type_name: &str) {
+    use std::fmt::Write as _;
+    let v = format!("lingo_vec_{}_t", type_name);
+    writeln!(out, "typedef struct {{ {n}* data; int64_t len; int64_t cap; }} {v};",
+             n = type_name, v = v).unwrap();
+    writeln!(out, "__attribute__((unused)) static {v} lingo_vec_{n}_new(void) {{ \
+                   {v} __v = {{ NULL, 0, 0 }}; return __v; }}",
+             n = type_name, v = v).unwrap();
+    writeln!(out, "__attribute__((unused)) static void lingo_vec_{n}_push({v}* v, {n} x) {{ \
+                   if (v->len == v->cap) {{ \
+                       int64_t nc = v->cap == 0 ? 4 : v->cap * 2; \
+                       v->data = ({n}*)realloc(v->data, (size_t)nc * sizeof({n})); \
+                       if (!v->data) {{ fprintf(stderr, \"lingo: oom in vec_{n}_push\\n\"); exit(1); }} \
+                       v->cap = nc; \
+                   }} \
+                   v->data[v->len++] = x; \
+                   }}",
+             n = type_name, v = v).unwrap();
+    writeln!(out, "__attribute__((unused)) static {n} lingo_vec_{n}_pop({v}* v) {{ \
+                   if (v->len == 0) {{ fprintf(stderr, \"lingo: vec.pop on empty vec\\n\"); exit(1); }} \
+                   return v->data[--v->len]; \
+                   }}",
+             n = type_name, v = v).unwrap();
+    writeln!(out, "__attribute__((unused)) static void lingo_vec_{n}_set({v}* v, int64_t i, {n} x) {{ \
+                   if (i < 0 || i >= v->len) {{ \
+                       fprintf(stderr, \"lingo: vec.set OOB\\n\"); exit(1); \
+                   }} \
+                   v->data[i] = x; \
+                   }}\n",
+             n = type_name, v = v).unwrap();
+}
+
 /// Lower a lingo type reference to a `CType`.
 /// `known_structs` lets us recognize user-defined struct names; we keep it
 /// optional so call sites that only care about primitives can pass `None`.
@@ -128,10 +165,12 @@ fn map_type_with(
         }
         let inner = map_type_with(&t.type_args[0], span, structs, enums)?;
         match &inner {
-            CType::I64 | CType::F64 | CType::Str => {}
+            // v0.1.19: vec[T] is monomorphized for any user struct/enum on top
+            // of the built-in i64/f64/str variants.
+            CType::I64 | CType::F64 | CType::Str | CType::Struct(_) | CType::Enum(_) => {}
             other => return Err(LingoError::new(
                 Stage::Resolve,
-                format!("C backend: only `vec[i64]`, `vec[f64]`, `vec[str]` are supported in v0.1.14 (got `vec[{}]`)",
+                format!("C backend: `vec[{}]` not supported yet (have: i64, f64, str, structs, enums)",
                         other.c_decl()),
                 span,
             )),
@@ -193,6 +232,7 @@ fn map_type_with(
     })
 }
 
+#[allow(dead_code)]
 fn map_type(t: &TypeRef, span: Span) -> Result<CType, LingoError> {
     map_type_with(t, span, None, None)
 }
@@ -372,7 +412,8 @@ impl Codegen {
                 self.structs.insert(s.name.clone(), fields);
             }
         }
-        // Pass 1c: emit `typedef struct { ... } Name;` for each struct.
+        // Pass 1c: emit `typedef struct { ... } Name;` for each struct, plus
+        // a monomorphized `vec[Name]` typedef + runtime helpers (v0.1.19).
         for item in items {
             if let Item::Struct(s) = item {
                 writeln!(self.type_defs, "typedef struct {} {{", s.name).unwrap();
@@ -380,6 +421,7 @@ impl Codegen {
                     writeln!(self.type_defs, "    {} {};", fty.c_decl(), fname).unwrap();
                 }
                 writeln!(self.type_defs, "}} {};\n", s.name).unwrap();
+                emit_user_vec_runtime(&mut self.type_defs, &s.name);
             }
         }
 
@@ -422,6 +464,7 @@ impl Codegen {
             }
             writeln!(self.type_defs, "    }} as;").unwrap();
             writeln!(self.type_defs, "}} {};\n", e.name).unwrap();
+            emit_user_vec_runtime(&mut self.type_defs, &e.name);
         }
 
         // Pass 2: collect function signatures (free + impl methods).
@@ -609,11 +652,38 @@ impl Codegen {
     fn emit_stmt(&mut self, s: &Stmt) -> Result<(), LingoError> {
         match s {
             Stmt::Let { is_mut: _, name, ty, value, span } => {
-                let (code, val_ty) = self.gen_expr(value)?;
-                let decl_ty = match ty {
-                    Some(t) => map_type(t, *span)?,
-                    None => val_ty.clone(),
+                // Pre-compute the declared type so we can use it to type-hint
+                // an empty `vec[]` literal on the RHS (otherwise it would
+                // default to `vec[i64]` and mismatch `let v: vec[Point]`).
+                let decl_hint = match ty {
+                    Some(t) => Some(map_type_with(t, *span, Some(&self.structs), Some(&self.enums))?),
+                    None => None,
                 };
+                let is_empty_vec_lit = matches!(&value.kind, ExprKind::VecLit(items) if items.is_empty());
+                let (code, val_ty) = if is_empty_vec_lit {
+                    if let Some(CType::Vec(inner)) = &decl_hint {
+                        let suffix: String = match inner.as_ref() {
+                            CType::I64 => "i64".to_string(),
+                            CType::F64 => "f64".to_string(),
+                            CType::Str => "str".to_string(),
+                            CType::Struct(n) | CType::Enum(n) => n.clone(),
+                            other => return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("C backend: empty `vec[{}]` not supported yet", other.c_decl()),
+                                *span,
+                            )),
+                        };
+                        (
+                            format!("lingo_vec_{}_new()", suffix),
+                            CType::Vec(inner.clone()),
+                        )
+                    } else {
+                        self.gen_expr(value)?
+                    }
+                } else {
+                    self.gen_expr(value)?
+                };
+                let decl_ty = decl_hint.unwrap_or_else(|| val_ty.clone());
                 if decl_ty != val_ty && !(decl_ty == CType::I64 && val_ty == CType::U64)
                     && !(decl_ty == CType::U64 && val_ty == CType::I64)
                 {
@@ -1266,11 +1336,12 @@ impl Codegen {
                 // Infer element type from the first item; require the rest to match.
                 let (first_code, first_ty) = self.gen_expr(&items[0])?;
                 match first_ty {
-                    CType::I64 | CType::F64 | CType::Str => {}
+                    CType::I64 | CType::F64 | CType::Str
+                    | CType::Struct(_) | CType::Enum(_) => {}
                     ref other => return Err(LingoError::new(
                         Stage::Resolve,
-                        format!("C backend: vec element type `{}` not supported (i64/f64/str only)",
-                                other.c_decl()),
+                        format!("C backend: vec element type `{}` not supported \
+                                 (have: i64/f64/str/struct/enum)", other.c_decl()),
                         items[0].span,
                     )),
                 }
@@ -1289,10 +1360,11 @@ impl Codegen {
                     parts.push(code);
                 }
                 let vec_ty = CType::Vec(Box::new(first_ty.clone()));
-                let suffix = match &first_ty {
-                    CType::I64 => "i64",
-                    CType::F64 => "f64",
-                    CType::Str => "str",
+                let suffix: String = match &first_ty {
+                    CType::I64 => "i64".to_string(),
+                    CType::F64 => "f64".to_string(),
+                    CType::Str => "str".to_string(),
+                    CType::Struct(name) | CType::Enum(name) => name.clone(),
                     _ => unreachable!("checked above"),
                 };
                 // Lower the literal to a GCC statement-expression that builds
@@ -1660,10 +1732,11 @@ impl Codegen {
             CType::Vec(inner) => (**inner).clone(),
             _ => unreachable!("gen_vec_method called with non-vec receiver"),
         };
-        let elem_suffix = match &elem_ty {
-            CType::I64 => "i64",
-            CType::F64 => "f64",
-            CType::Str => "str",
+        let elem_suffix: String = match &elem_ty {
+            CType::I64 => "i64".to_string(),
+            CType::F64 => "f64".to_string(),
+            CType::Str => "str".to_string(),
+            CType::Struct(name) | CType::Enum(name) => name.clone(),
             other => return Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: vec element type `{}` not supported in methods", other.c_decl()),
