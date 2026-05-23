@@ -1,0 +1,37 @@
+# v0.2.4: float(s) -> float ! str on both backends.
+#
+# Mirrors the v0.2.0 parse_int example: lift str errors into the caller's
+# enum via the v0.2.3 `impl From[str] for E` machinery, then call
+# `float(s)?` without an `else` annotation.
+
+enum FloatErr:
+    Empty
+    NotANumber
+
+impl From[str] for FloatErr:
+    fn from(e: str) -> FloatErr:
+        if e.contains("can't parse \"\""):
+            return FloatErr.Empty
+        return FloatErr.NotANumber
+
+fn safe_float(s: str) -> float ! FloatErr:
+    let f = float(s)?
+    return f
+
+fn show(s: str):
+    let r = safe_float(s)
+    match r:
+        ok(f):
+            print(f"ok: {f}")
+        err(e):
+            match e:
+                Empty:
+                    print("err: empty")
+                NotANumber:
+                    print("err: not a number")
+
+fn main():
+    show("3.14")
+    show("")
+    show("nope")
+    show("1e9")

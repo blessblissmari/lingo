@@ -748,6 +748,33 @@ fn c_backend_try_else_coerce_native() {
 }
 
 #[test]
+fn parse_float_interp() {
+    // v0.2.4: `float(s) -> float ! str` on the interp side.  Identical
+    // shape to v0.2.0's `parse_int_interp`: parsing + From-trait coercion
+    // into a caller's enum without an `else` annotation.
+    let (stdout, stderr, code) = run("parse_float.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+ok: 3.14\n\
+err: empty\n\
+err: not a number\n\
+ok: 1000000000.0\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_parse_float_native() {
+    // v0.2.4: native build of the same example.  Failure messages route
+    // through the same `lingo_str_debug_escape` helper that the int
+    // parser uses, so `float: can't parse "..."` is byte-identical to
+    // the interpreter for ASCII inputs.
+    let Some((stdout, stderr, code)) = run_native("parse_float.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("parse_float.lingo");
+    assert_eq!(stdout, interp_out, "native parse_float drifted from interp");
+}
+
+#[test]
 fn try_from_trait_interp() {
     // v0.2.3: `impl From[E1] for E2:` makes `int(s)?` auto-coerce its
     // `str` err into the caller's `ParseErr` without an `else` fallback.
