@@ -76,6 +76,19 @@ contains 'cat'? false
 }
 
 #[test]
+fn parse_port() {
+    let (stdout, stderr, code) = run("parse_port.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+ok: 8080 -> port
+err: empty
+err: not a number
+err: out of range
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
 fn shapes() {
     let (stdout, stderr, code) = run("shapes.lingo");
     assert_eq!(code, 0, "stderr: {stderr}");
