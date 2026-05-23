@@ -50,6 +50,13 @@ pub struct TraitMethod {
 #[derive(Debug, Clone)]
 pub struct ImplTraitBlock {
     pub trait_name: String,
+    /// Optional generic-args between brackets after the trait name —
+    /// `impl From[str] for ParseErr:` parses with `trait_args = ["str"]`.
+    /// v0.2.3 only uses this for the built-in `From` "trait" (which has
+    /// no user-visible `trait` declaration); regular `trait` impls
+    /// must leave this empty.  Each element is a type name (no nesting
+    /// for now — `From[map[str, int]]` and friends are deferred).
+    pub trait_args: Vec<String>,
     pub target: String,
     pub methods: Vec<FnDecl>,
     pub span: Span,

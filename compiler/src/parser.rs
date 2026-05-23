@@ -206,6 +206,25 @@ impl Parser {
             Tok::Ident(s) => s,
             _ => unreachable!(),
         };
+        // Optional generic-args between brackets: `impl From[str] for ParseErr:`
+        // — v0.2.3 only the built-in `From` uses this; everything else
+        // leaves `trait_args` empty.  We accept the syntax generically
+        // so future trait-generics can reuse the same parse.
+        let mut trait_args: Vec<String> = Vec::new();
+        if self.eat(Tok::LBracket) {
+            loop {
+                let ty_tok = self.expect(Tok::Ident("".into()), "type argument inside `[...]`")?;
+                let ty = match ty_tok.tok {
+                    Tok::Ident(s) => s,
+                    _ => unreachable!(),
+                };
+                trait_args.push(ty);
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RBracket, "`]` after trait args")?;
+        }
         if self.eat(Tok::For) {
             // impl <Trait> for <Type>:
             let type_tok = self.expect(Tok::Ident("".into()), "type to impl trait for")?;
@@ -230,12 +249,20 @@ impl Parser {
             self.expect(Tok::Dedent, "dedent")?;
             return Ok(Item::ImplTrait(ImplTraitBlock {
                 trait_name: first_name,
+                trait_args,
                 target,
                 methods,
                 span: Span::new(start, end),
             }));
         }
         // plain `impl <Type>:`
+        if !trait_args.is_empty() {
+            return Err(LingoError::new(
+                Stage::Parse,
+                "type-args `[...]` only allowed on `impl Trait[..] for Type:`",
+                Span::new(start, self.peek().span.start),
+            ));
+        }
         let target = first_name;
         self.expect(Tok::Colon, "`:`")?;
         self.expect(Tok::Newline, "newline")?;

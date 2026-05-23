@@ -748,6 +748,33 @@ fn c_backend_try_else_coerce_native() {
 }
 
 #[test]
+fn try_from_trait_interp() {
+    // v0.2.3: `impl From[E1] for E2:` makes `int(s)?` auto-coerce its
+    // `str` err into the caller's `ParseErr` without an `else` fallback.
+    let (stdout, stderr, code) = run("try_from.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "ok(42)\n\
+         Empty\n\
+         NotANumber\n",
+    );
+}
+
+#[test]
+fn c_backend_try_from_trait_native() {
+    // v0.2.3: native build for the same example — the codegen looks up
+    // `from_impls[(inner_e_suffix, raises_e_suffix)]` and emits a call to
+    // the mangled `lingo_from_<E1>__<E2>` fn in place of `__tr_n.err`,
+    // so the err arm of the outer Result is constructed from the wrapped
+    // value, not the raw inner err.
+    let Some((stdout, stderr, code)) = run_native("try_from.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("try_from.lingo");
+    assert_eq!(stdout, interp_out, "native try_from drifted from interp");
+}
+
+#[test]
 fn io_roundtrip() {
     let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
     assert_eq!(code, 0, "stderr: {stderr}");

@@ -1,0 +1,30 @@
+# v0.2.3 demo: `impl From[E1] for E2:` auto-coerces `?` between error types.
+#
+# `int(s)` raises `str`; `safe_int` raises `ParseErr`.  Instead of the
+# v0.2.2 explicit `? else ParseErr.NotANumber`, the `From[str] for ParseErr`
+# impl below tells the compiler how to wrap, and plain `int(s)?` just works.
+
+enum ParseErr:
+    Empty
+    NotANumber
+
+impl From[str] for ParseErr:
+    fn from(e: str) -> ParseErr:
+        return ParseErr.NotANumber
+
+fn safe_int(s: str) -> int ! ParseErr:
+    if s.len() == 0:
+        raise ParseErr.Empty
+    let n = int(s)?
+    return n
+
+fn main():
+    match safe_int("42"):
+        ok(n): print(f"ok({n})")
+        err(e): print("err")
+    match safe_int(""):
+        ok(_): print("unexpected ok")
+        err(_): print("Empty")
+    match safe_int("nope"):
+        ok(_): print("unexpected ok")
+        err(_): print("NotANumber")

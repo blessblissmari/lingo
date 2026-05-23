@@ -196,6 +196,21 @@ lookup or `From[A] for B` instance pool — and makes the loss of inner
 detail visible at the call site.  A real `from`-style trait can be
 added later without breaking the sugar.
 
+extended in v0.2.3: the `from`-style trait *was* added — `impl From[E1]
+for E2:` registers a `fn from(e: E1) -> E2` that `?` consults when the
+inner err's type doesn't match the caller's `raises.1`.  This makes
+plain `int(s)?` work inside a fn raising `ParseErr`, no `else`
+annotation per call site.  Both forms coexist by design: the v0.2.2
+sugar `? else <value>` still wins per call site when it's present, so
+a single odd-one-out call site can override the trait without
+deleting the impl, and the type system stays *local* — no implicit
+chains, no multi-step `From` searching, the lookup is a single direct
+hit on the `(E1, E2)` pair.  If no `From` impl is in scope and no
+`else` is supplied, the existing diagnostic fires (now suggesting
+both fixes).  `From` is a built-in/magic trait (no user `trait From`
+decl needed); when we add generic-trait support generally, this
+machinery folds into it.
+
 extended in v0.2.1: `Opt[T]` renders as **the inner value's display**
 when present, and **`none`** (lowercase, no quotes) when absent.  No
 `Some(...)` wrapper text — same intent as `Value::display` everywhere

@@ -116,7 +116,7 @@ impl CType {
     }
 
     /// Suffix used in monomorphized names (`lingo_vec_<sfx>_*`, `lingo_result_<sfx>_*`).
-    fn mono_suffix(&self) -> String {
+    pub fn mono_suffix(&self) -> String {
         match self {
             CType::I64 => "i64".into(),
             CType::U64 => "u64".into(),
@@ -158,6 +158,15 @@ impl CType {
 /// Reverse-lookup a `mono_suffix` (i64/f64/str/.../<TypeName>) back to a C
 /// type declaration string.  Used when emitting `lingo_result_<T>_<E>_t`
 /// typedefs since we only stored the suffix in `result_pairs`.
+fn mono_suffix_for_name(name: &str) -> String {
+    match name {
+        "int" => "i64".into(),
+        "float" => "f64".into(),
+        "uint" => "u64".into(),
+        _ => name.into(),
+    }
+}
+
 fn mono_suffix_to_c_decl(
     sfx: &str,
     structs: &HashMap<String, Vec<(String, CType)>>,
@@ -357,6 +366,7 @@ pub struct Codegen {
     /// `self.scopes` is empty during the top-level pass (fn bodies push
     /// their own frame), so consts can't live there.
     consts: std::collections::HashSet<String>,
+    from_impls: HashMap<(String, String), String>,
 }
 
 impl Codegen {
@@ -377,6 +387,7 @@ impl Codegen {
             current_fn_raises: None,
             inferred_empty_vec_types: HashMap::new(),
             consts: std::collections::HashSet::new(),
+            from_impls: HashMap::new(),
         }
     }
 
@@ -423,6 +434,51 @@ impl Codegen {
             match item {
                 Item::Trait(_) => { /* drop: pure declaration, lowered above */ }
                 Item::ImplTrait(b) => {
+                    if b.trait_name == "From" {
+                        if b.trait_args.len() != 1 {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("`impl From[..] for {}` expects exactly one type arg, got {}",
+                                        b.target, b.trait_args.len()),
+                                b.span,
+                            ));
+                        }
+                        if b.methods.len() != 1 || b.methods[0].name != "from" {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                "`impl From[..] for ..` must contain exactly one method `fn from(e: <E1>) -> <E2>`",
+                                b.span,
+                            ));
+                        }
+                        let from_ty = b.trait_args[0].clone();
+                        let to_ty = b.target.clone();
+                        let key = (from_ty.clone(), to_ty.clone());
+                        if self.from_impls.contains_key(&key) {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("duplicate `impl From[{}] for {}`", from_ty, to_ty),
+                                b.span,
+                            ));
+                        }
+                        let mangled = format!(
+                            "lingo_from_{}__{}",
+                            mono_suffix_for_name(&from_ty),
+                            mono_suffix_for_name(&to_ty),
+                        );
+                        self.from_impls.insert(key, mangled.clone());
+                        let mut renamed = b.methods[0].clone();
+                        renamed.name = mangled;
+                        lowered_items.push(Item::Fn(renamed));
+                        continue;
+                    }
+                    if !b.trait_args.is_empty() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("trait `{}` does not take type args (only built-in `From` does in v0.2.3)",
+                                    b.trait_name),
+                            b.span,
+                        ));
+                    }
                     let trait_decl = traits.get(&b.trait_name).cloned().ok_or_else(|| {
                         LingoError::new(
                             Stage::Resolve,
@@ -2267,14 +2323,22 @@ impl Codegen {
                     )),
                 };
                 let has_fallback = fallback.is_some();
-                if inner_e != raises.1 && !has_fallback {
+                let from_fn_for_coerce: Option<String> = if inner_e != raises.1 && !has_fallback {
+                    self.from_impls
+                        .get(&(inner_e.mono_suffix(), raises.1.mono_suffix()))
+                        .cloned()
+                } else {
+                    None
+                };
+                if inner_e != raises.1 && !has_fallback && from_fn_for_coerce.is_none() {
                     return Err(LingoError::new(
                         Stage::Resolve,
                         format!(
                             "C backend: `?` propagates `{}` but caller raises `{}`. \
-                             use `expr? else <value>` to map the error \
-                             (e.g. `int(s)? else ParseErr.NotANumber`)",
-                            inner_e.c_decl(), raises.1.c_decl()
+                             either add `impl From[{}] for {}:` to coerce automatically, \
+                             or use `expr? else <value>` at the call site",
+                            inner_e.c_decl(), raises.1.c_decl(),
+                            inner_e.mono_suffix(), raises.1.mono_suffix()
                         ),
                         e.span,
                     ));
@@ -2299,10 +2363,9 @@ impl Codegen {
                             e.span,
                         ));
                     }
-                    // Reference __tr_<n> with a comma-expr so the inner err is
-                    // still evaluated (in case of side effects) but the
-                    // fallback value is what we raise.
                     format!("((void)__tr_{n}.err, ({}))", fb_code)
+                } else if let Some(from_fn) = &from_fn_for_coerce {
+                    format!("{}(__tr_{n}.err)", from_fn)
                 } else {
                     format!("__tr_{n}.err")
                 };
