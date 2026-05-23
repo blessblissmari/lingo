@@ -16,9 +16,7 @@ fn cargo_bin() -> String {
 /// Returns (stdout, stderr, exit_code) of the compiled program.
 /// Skipped silently when no C compiler is available.
 fn run_native(file: &str) -> Option<(String, String, i32)> {
-    if which_cc().is_none() {
-        return None;
-    }
+    which_cc()?;
     let tmp = std::env::temp_dir().join(format!("lingo_native_{}", file.replace('/', "_")));
     let _ = std::fs::remove_file(&tmp);
     // build
