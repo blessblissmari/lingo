@@ -232,7 +232,15 @@ pub enum ExprKind {
     VecLit(Vec<Expr>),
     MapLit(Vec<(Expr, Expr)>),
     FString(Vec<FStringPart>),
-    Try(Box<Expr>), // postfix `?` — propagate error from a fallible call
+    /// postfix `?` — propagate error from a fallible call.
+    /// Optional `fallback`: `expr? else <fallback>` lifts the inner error
+    /// into the caller's `raises.1` type by raising `<fallback>` instead.
+    /// This is how v0.2.2 closes the error-type-coercion gap (e.g. wrapping
+    /// `int(s) -> int!str` failures into a caller's `int!ParseErr`).
+    Try {
+        inner: Box<Expr>,
+        fallback: Option<Box<Expr>>,
+    },
     /// `forever` — only legal as the iterable of `for _ in forever:`.
     /// Lowered to an infinite loop. Not a value; cannot be assigned, returned,
     /// printed, etc.

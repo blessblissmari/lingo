@@ -713,6 +713,41 @@ fn c_backend_parse_int_native() {
 }
 
 #[test]
+fn try_else_coerce_interp() {
+    // v0.2.2: `? else <expr>` lifts the inner error into the caller's
+    // raise type.  This is the interp-side pin.
+    let (stdout, stderr, code) = run("try_else.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "ok: 42\n\
+         err: empty\n\
+         err: nan\n\
+         ok: 0\n",
+    );
+}
+
+#[test]
+fn c_backend_try_else_coerce_native() {
+    // v0.2.2: the C backend's `?` accepts a typed mismatch when an
+    // `else <expr>` fallback is provided, lowering to
+    //   `if (__tr_n.is_err) return (outer){ .is_err = true, .err = <fb> }`
+    // The `__tr_n.err` is referenced via a comma-expr so side effects
+    // in the inner call are preserved without forcing a type match.
+    let Some((stdout, stderr, code)) = run_native("try_else.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("try_else.lingo");
+    assert_eq!(stdout, interp_out, "native try_else drifted from interp");
+    assert_eq!(
+        stdout,
+        "ok: 42\n\
+         err: empty\n\
+         err: nan\n\
+         ok: 0\n",
+    );
+}
+
+#[test]
 fn io_roundtrip() {
     let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
     assert_eq!(code, 0, "stderr: {stderr}");

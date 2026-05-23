@@ -17,12 +17,10 @@ SKIP_NATIVE[hello]=""      # placeholder; nothing skipped by default
 INTERACTIVE_EXAMPLES=("io_roundtrip" "fib_native_bench")
 
 # Examples that exercise interp-only features tracked for v0.2.x:
-#   - tour:      uses `int(s)?` `?` error coercion (interp lifts str → enum,
-#                C backend hasn't grown that coercion path yet).
-# `wordcount` graduated to interp ≡ native in v0.2.1 thanks to `Opt[T]`
-# support for `map.get`; the dedicated `wordcount_native.lingo` is kept as
-# the older `has`/`get` companion test point (now also `match`-based).
-INTERP_ONLY_EXAMPLES=("tour")
+# (empty as of v0.2.2 — `tour.lingo` graduated to interp ≡ native after the
+# `? else <expr>` error-type coercion landed.  `wordcount.lingo` graduated
+# in v0.2.1.  Keep the list around: future drift may re-introduce gaps.)
+INTERP_ONLY_EXAMPLES=()
 is_interp_only() {
     local stem=$1
     for x in "${INTERP_ONLY_EXAMPLES[@]}"; do

@@ -1174,7 +1174,7 @@ impl Interp {
                 }
                 Ok(Value::Str(s))
             }
-            ExprKind::Try(inner) => {
+            ExprKind::Try { inner, fallback } => {
                 let v = self.eval(inner)?;
                 if self.pending_raise.is_some() {
                     return Ok(Value::None_);
@@ -1183,7 +1183,21 @@ impl Interp {
                     Value::Result_(rc) => match rc.as_ref() {
                         Ok(val) => Ok(val.clone()),
                         Err(err) => {
-                            self.pending_raise = Some(err.clone());
+                            // With `else <fb>`, raise the fallback expr's
+                            // value instead of the inner err — this is
+                            // how `?` coerces between error types in
+                            // v0.2.2.  Without `else`, the inner err
+                            // propagates as-is (v0.1.21 behaviour).
+                            let raised = if let Some(fb) = fallback {
+                                let v = self.eval(fb)?;
+                                if self.pending_raise.is_some() {
+                                    return Ok(Value::None_);
+                                }
+                                v
+                            } else {
+                                err.clone()
+                            };
+                            self.pending_raise = Some(raised);
                             Ok(Value::None_)
                         }
                     },

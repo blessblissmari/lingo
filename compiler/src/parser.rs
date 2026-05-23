@@ -1053,9 +1053,20 @@ impl Parser {
                 };
             } else if self.at(Tok::Question) {
                 let q = self.advance();
-                let span = Span::new(e.span.start, q.span.end);
+                // Optional `else <expr>` for error-type coercion (v0.2.2).
+                // `e? else fb` propagates the success value of `e` and, on
+                // error, raises `fb` into the caller's raise type instead
+                // of the inner error (which may have a different type).
+                let (fallback, end) = if self.eat(Tok::Else) {
+                    let fb = self.expr()?;
+                    let end = fb.span.end;
+                    (Some(Box::new(fb)), end)
+                } else {
+                    (None, q.span.end)
+                };
+                let span = Span::new(e.span.start, end);
                 e = Expr {
-                    kind: ExprKind::Try(Box::new(e)),
+                    kind: ExprKind::Try { inner: Box::new(e), fallback },
                     span,
                 };
             } else {

@@ -2246,8 +2246,11 @@ impl Codegen {
                     e.span,
                 ));
             }
-            ExprKind::Try(inner) => {
+            ExprKind::Try { inner, fallback } => {
                 // `x?` — eager unwrap + propagate error to the caller.
+                // `x? else fb` — same, but raise `fb` (typed as the caller's
+                // raise type) instead of the inner err, so the two error
+                // types may differ.  Closes the v0.2.2 coercion gap.
                 // Only valid inside a fallible function (`fn ... -> T ! E`).
                 let raises = self.current_fn_raises.clone().ok_or_else(|| LingoError::new(
                     Stage::Resolve,
@@ -2263,23 +2266,52 @@ impl Codegen {
                         e.span,
                     )),
                 };
-                if inner_e != raises.1 {
+                let has_fallback = fallback.is_some();
+                if inner_e != raises.1 && !has_fallback {
                     return Err(LingoError::new(
                         Stage::Resolve,
-                        format!("C backend: `?` propagates `{}` but caller raises `{}`",
-                                inner_e.c_decl(), raises.1.c_decl()),
+                        format!(
+                            "C backend: `?` propagates `{}` but caller raises `{}`. \
+                             use `expr? else <value>` to map the error \
+                             (e.g. `int(s)? else ParseErr.NotANumber`)",
+                            inner_e.c_decl(), raises.1.c_decl()
+                        ),
                         e.span,
                     ));
                 }
+                // Make sure the inner Result typedef gets emitted even
+                // when only `?` references it (the inner call site may
+                // have suppressed its own registration).
+                self.result_pairs.insert((inner_t.mono_suffix(), inner_e.mono_suffix()));
                 let n = self.tmp_counter;
                 self.tmp_counter += 1;
                 let inner_res = CType::Result(Box::new(inner_t.clone()), Box::new(inner_e.clone()));
                 let outer_res = CType::Result(Box::new(raises.0.clone()), Box::new(raises.1.clone()));
+                let err_expr = if let Some(fb) = fallback {
+                    let (fb_code, fb_ty) = self.gen_expr(fb)?;
+                    if fb_ty != raises.1 {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!(
+                                "C backend: `? else <expr>` fallback has type `{}` but caller raises `{}`",
+                                fb_ty.c_decl(), raises.1.c_decl()
+                            ),
+                            e.span,
+                        ));
+                    }
+                    // Reference __tr_<n> with a comma-expr so the inner err is
+                    // still evaluated (in case of side effects) but the
+                    // fallback value is what we raise.
+                    format!("((void)__tr_{n}.err, ({}))", fb_code)
+                } else {
+                    format!("__tr_{n}.err")
+                };
                 let code = format!(
-                    "({{ {ir} __tr_{n} = {expr}; if (__tr_{n}.is_err) return ({or}){{ .is_err = true, .err = __tr_{n}.err }}; __tr_{n}.ok; }})",
+                    "({{ {ir} __tr_{n} = {expr}; if (__tr_{n}.is_err) return ({or}){{ .is_err = true, .err = {ee} }}; __tr_{n}.ok; }})",
                     ir = inner_res.c_decl(),
                     or = outer_res.c_decl(),
                     expr = inner_code,
+                    ee = err_expr,
                     n = n,
                 );
                 (code, inner_t)

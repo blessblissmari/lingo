@@ -185,6 +185,17 @@ runtime helper mirrors rust's `Debug for &str` byte-for-byte
 (`"..."` wrapping, `\"`/`\\`/`\n`/`\t`/`\r`/NUL escapes, `\xNN` for
 other ASCII control chars, non-ASCII bytes pass through).
 
+extended in v0.2.2: error-type coercion is **explicit**, not implicit.
+`?` continues to require `inner_e == caller.raises.1` exactly — there
+is no silent "lift `str` into your enum" behaviour.  Instead, callers
+write `expr? else <fallback>` to opt in: the `<fallback>` value is
+evaluated in the err arm and raised as the caller's error type, while
+the original inner err is discarded (after evaluation, in case of
+side effects).  This keeps the type system local — no global trait
+lookup or `From[A] for B` instance pool — and makes the loss of inner
+detail visible at the call site.  A real `from`-style trait can be
+added later without breaking the sugar.
+
 extended in v0.2.1: `Opt[T]` renders as **the inner value's display**
 when present, and **`none`** (lowercase, no quotes) when absent.  No
 `Some(...)` wrapper text — same intent as `Value::display` everywhere
