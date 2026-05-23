@@ -175,38 +175,75 @@ impl Interp {
     }
 
     pub fn run_program(&mut self, prog: &Program) -> Result<Value, LingoError> {
+        self.register_items(prog, false)?;
+        let main = self
+            .fns
+            .get("main")
+            .cloned()
+            .ok_or_else(|| LingoError::new(Stage::Resolve, "no `main` function", Span::dummy()))?;
+        if !main.params.is_empty() {
+            return Err(LingoError::new(
+                Stage::Resolve,
+                "`fn main` must take no parameters in v0.1",
+                main.span,
+            ));
+        }
+        self.call_fn(&main, vec![])
+    }
+
+    /// Register every top-level item from `prog` into the interpreter's
+    /// tables, running the same two-pass resolution that `run_program` does
+    /// (types/sigs first, then methods/consts/trait impls).  When
+    /// `allow_replace` is true, duplicate declarations silently replace the
+    /// previous version — this is the REPL's "redefine on the fly" mode.
+    /// When false, duplicates are rejected (the file/program mode).
+    pub fn register_items(&mut self, prog: &Program, allow_replace: bool)
+        -> Result<(), LingoError>
+    {
         // first pass: register types and signatures
         for item in &prog.items {
             match item {
                 Item::Fn(f) => {
-                    if self.fns.insert(f.name.clone(), f.clone()).is_some() {
+                    if !allow_replace && self.fns.contains_key(&f.name) {
                         return Err(LingoError::new(
                             Stage::Resolve,
                             format!("duplicate function `{}`", f.name),
                             f.span,
                         ));
                     }
+                    self.fns.insert(f.name.clone(), f.clone());
                 }
                 Item::Struct(s) => {
-                    if self.structs.insert(s.name.clone(), s.clone()).is_some() {
+                    if !allow_replace && self.structs.contains_key(&s.name) {
                         return Err(LingoError::new(
                             Stage::Resolve,
                             format!("duplicate struct `{}`", s.name),
                             s.span,
                         ));
                     }
+                    self.structs.insert(s.name.clone(), s.clone());
+                    // Replacing a struct invalidates its methods & trait impls.
+                    if allow_replace {
+                        self.methods.remove(&s.name);
+                        self.trait_impls.remove(&s.name);
+                    }
                 }
                 Item::Enum(e) => {
-                    if self.enums.insert(e.name.clone(), e.clone()).is_some() {
+                    if !allow_replace && self.enums.contains_key(&e.name) {
                         return Err(LingoError::new(
                             Stage::Resolve,
                             format!("duplicate enum `{}`", e.name),
                             e.span,
                         ));
                     }
+                    self.enums.insert(e.name.clone(), e.clone());
+                    if allow_replace {
+                        self.methods.remove(&e.name);
+                        self.trait_impls.remove(&e.name);
+                    }
                 }
                 Item::Trait(t) => {
-                    if self.traits.contains_key(&t.name) {
+                    if !allow_replace && self.traits.contains_key(&t.name) {
                         return Err(LingoError::new(
                             Stage::Resolve,
                             format!("duplicate trait `{}`", t.name),
@@ -231,24 +268,26 @@ impl Interp {
                     }
                     let entry = self.methods.entry(b.target.clone()).or_default();
                     for m in &b.methods {
-                        if entry.insert(m.name.clone(), m.clone()).is_some() {
+                        if !allow_replace && entry.contains_key(&m.name) {
                             return Err(LingoError::new(
                                 Stage::Resolve,
                                 format!("duplicate method `{}.{}`", b.target, m.name),
                                 m.span,
                             ));
                         }
+                        entry.insert(m.name.clone(), m.clone());
                     }
                 }
                 Item::Const(c) => {
                     let v = self.eval_const(&c.value)?;
-                    if self.consts.insert(c.name.clone(), v).is_some() {
+                    if !allow_replace && self.consts.contains_key(&c.name) {
                         return Err(LingoError::new(
                             Stage::Resolve,
                             format!("duplicate const `{}`", c.name),
                             c.span,
                         ));
                     }
+                    self.consts.insert(c.name.clone(), v);
                 }
                 Item::ImplTrait(b) => {
                     // The trait must exist.
@@ -312,31 +351,44 @@ impl Interp {
                     let entry = self.trait_impls
                         .entry(b.target.clone())
                         .or_default();
-                    if entry.insert(b.trait_name.clone(), resolved).is_some() {
+                    if !allow_replace && entry.contains_key(&b.trait_name) {
                         return Err(LingoError::new(
                             Stage::Resolve,
                             format!("duplicate `impl {} for {}`", b.trait_name, b.target),
                             b.span,
                         ));
                     }
+                    entry.insert(b.trait_name.clone(), resolved);
                 }
                 _ => {}
             }
         }
+        Ok(())
+    }
 
-        let main = self
-            .fns
-            .get("main")
-            .cloned()
-            .ok_or_else(|| LingoError::new(Stage::Resolve, "no `main` function", Span::dummy()))?;
-        if !main.params.is_empty() {
-            return Err(LingoError::new(
-                Stage::Resolve,
-                "`fn main` must take no parameters in v0.1",
-                main.span,
-            ));
+    /// REPL entry: ensure there's a persistent root scope, then exec a
+    /// single statement against it.  Used to evaluate top-level let/expr/print
+    /// statements between REPL prompts.  Returns the value produced (for
+    /// bare-expression statements that's the expression's value; everything
+    /// else returns `Value::None_`).
+    pub fn exec_top_stmt(&mut self, s: &Stmt) -> Result<Value, LingoError> {
+        if self.scopes.is_empty() {
+            self.scopes.push(Scope { bindings: HashMap::new() });
         }
-        self.call_fn(&main, vec![])
+        match self.exec_stmt(s)? {
+            Flow::Normal => Ok(Value::None_),
+            Flow::Return(v) => Ok(v),
+            Flow::Break | Flow::Continue => Err(LingoError::new(
+                Stage::Resolve,
+                "`break` / `continue` not valid at REPL top level",
+                Span::dummy(),
+            )),
+            Flow::Raise(e) => Err(LingoError::new(
+                Stage::Runtime,
+                format!("uncaught error at REPL top level: {}", e.display()),
+                Span::dummy(),
+            )),
+        }
     }
 
     fn eval_const(&self, e: &Expr) -> Result<Value, LingoError> {
