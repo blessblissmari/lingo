@@ -78,12 +78,146 @@ impl Parser {
         match self.peek_tok() {
             Tok::Fn => Ok(Item::Fn(self.fn_decl()?)),
             Tok::Const => Ok(Item::Const(self.const_decl()?)),
+            Tok::Struct => Ok(Item::Struct(self.struct_decl()?)),
+            Tok::Enum => Ok(Item::Enum(self.enum_decl()?)),
+            Tok::Impl => Ok(Item::Impl(self.impl_block()?)),
             other => Err(LingoError::new(
                 Stage::Parse,
-                format!("expected `fn` or `const` at top level, got {:?}", other),
+                format!(
+                    "expected `fn`, `const`, `struct`, `enum`, or `impl` at top level, got {:?}",
+                    other
+                ),
                 self.peek().span,
             )),
         }
+    }
+
+    fn struct_decl(&mut self) -> Result<StructDecl, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Struct, "`struct`")?;
+        let name_tok = self.expect(Tok::Ident("".into()), "struct name")?;
+        let name = match name_tok.tok {
+            Tok::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        self.expect(Tok::Colon, "`:`")?;
+        self.expect(Tok::Newline, "newline")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented field block")?;
+        let mut fields = Vec::new();
+        while !self.at(Tok::Dedent) && !self.at(Tok::Eof) {
+            self.skip_newlines();
+            if self.at(Tok::Dedent) || self.at(Tok::Eof) {
+                break;
+            }
+            let f_start = self.peek().span.start;
+            let f_name_tok = self.expect(Tok::Ident("".into()), "field name")?;
+            let f_name = match f_name_tok.tok {
+                Tok::Ident(s) => s,
+                _ => unreachable!(),
+            };
+            self.expect(Tok::Colon, "`:` after field name")?;
+            let ty = self.type_ref()?;
+            let f_end = ty.span.end;
+            self.expect(Tok::Newline, "newline")?;
+            fields.push(FieldDecl {
+                name: f_name,
+                ty,
+                span: Span::new(f_start, f_end),
+            });
+            self.skip_newlines();
+        }
+        let end = self.peek().span.start;
+        self.expect(Tok::Dedent, "dedent")?;
+        Ok(StructDecl {
+            name,
+            fields,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn enum_decl(&mut self) -> Result<EnumDecl, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Enum, "`enum`")?;
+        let name_tok = self.expect(Tok::Ident("".into()), "enum name")?;
+        let name = match name_tok.tok {
+            Tok::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        self.expect(Tok::Colon, "`:`")?;
+        self.expect(Tok::Newline, "newline")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented variant block")?;
+        let mut variants = Vec::new();
+        while !self.at(Tok::Dedent) && !self.at(Tok::Eof) {
+            self.skip_newlines();
+            if self.at(Tok::Dedent) || self.at(Tok::Eof) {
+                break;
+            }
+            let v_start = self.peek().span.start;
+            let v_name_tok = self.expect(Tok::Ident("".into()), "variant name")?;
+            let v_name = match v_name_tok.tok {
+                Tok::Ident(s) => s,
+                _ => unreachable!(),
+            };
+            let mut payload = Vec::new();
+            if self.eat(Tok::LParen) {
+                if !self.at(Tok::RParen) {
+                    loop {
+                        payload.push(self.type_ref()?);
+                        if !self.eat(Tok::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Tok::RParen, "`)`")?;
+            }
+            let v_end = self.peek().span.start;
+            self.expect(Tok::Newline, "newline")?;
+            variants.push(EnumVariant {
+                name: v_name,
+                payload,
+                span: Span::new(v_start, v_end),
+            });
+            self.skip_newlines();
+        }
+        let end = self.peek().span.start;
+        self.expect(Tok::Dedent, "dedent")?;
+        Ok(EnumDecl {
+            name,
+            variants,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn impl_block(&mut self) -> Result<ImplBlock, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Impl, "`impl`")?;
+        let name_tok = self.expect(Tok::Ident("".into()), "type to impl")?;
+        let target = match name_tok.tok {
+            Tok::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        self.expect(Tok::Colon, "`:`")?;
+        self.expect(Tok::Newline, "newline")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented method block")?;
+        let mut methods = Vec::new();
+        while !self.at(Tok::Dedent) && !self.at(Tok::Eof) {
+            self.skip_newlines();
+            if self.at(Tok::Dedent) || self.at(Tok::Eof) {
+                break;
+            }
+            methods.push(self.fn_decl()?);
+            self.skip_newlines();
+        }
+        let end = self.peek().span.start;
+        self.expect(Tok::Dedent, "dedent")?;
+        Ok(ImplBlock {
+            target,
+            methods,
+            span: Span::new(start, end),
+        })
     }
 
     fn fn_decl(&mut self) -> Result<FnDecl, LingoError> {
@@ -97,10 +231,28 @@ impl Parser {
         self.expect(Tok::LParen, "`(`")?;
         let mut params = Vec::new();
         if !self.at(Tok::RParen) {
-            loop {
-                params.push(self.param()?);
-                if !self.eat(Tok::Comma) {
-                    break;
+            // optionally `self` as first parameter (in impl blocks)
+            if self.at(Tok::Self_) {
+                let s_tok = self.advance();
+                params.push(Param {
+                    name: "self".into(),
+                    ty: TypeRef { name: "Self".into(), span: s_tok.span },
+                    span: s_tok.span,
+                });
+                if self.eat(Tok::Comma) {
+                    loop {
+                        params.push(self.param()?);
+                        if !self.eat(Tok::Comma) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                loop {
+                    params.push(self.param()?);
+                    if !self.eat(Tok::Comma) {
+                        break;
+                    }
                 }
             }
         }
@@ -202,6 +354,7 @@ impl Parser {
             Tok::Return => self.return_stmt(),
             Tok::If => self.if_stmt(),
             Tok::For => self.for_stmt(),
+            Tok::Match => self.match_stmt(),
             Tok::Break => {
                 let span = self.advance().span;
                 self.expect(Tok::Newline, "newline")?;
@@ -220,11 +373,12 @@ impl Parser {
                     let end = value.span.end;
                     self.expect(Tok::Newline, "newline")?;
                     let target = match expr.kind {
-                        ExprKind::Ident(s) => s,
+                        ExprKind::Ident(s) => AssignTarget::Name(s),
+                        ExprKind::Field(obj, name) => AssignTarget::Field(obj, name),
                         _ => {
                             return Err(LingoError::new(
                                 Stage::Parse,
-                                "only simple names can be assigned to in v0.1",
+                                "left side of `=` must be a name or a field access",
                                 expr.span,
                             ))
                         }
@@ -239,6 +393,191 @@ impl Parser {
                     Ok(Stmt::Expr(expr))
                 }
             }
+        }
+    }
+
+    fn match_stmt(&mut self) -> Result<Stmt, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Match, "`match`")?;
+        let scrutinee = self.expr()?;
+        self.expect(Tok::Colon, "`:` after match scrutinee")?;
+        self.expect(Tok::Newline, "newline")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented match arms")?;
+        let mut arms = Vec::new();
+        while !self.at(Tok::Dedent) && !self.at(Tok::Eof) {
+            self.skip_newlines();
+            if self.at(Tok::Dedent) || self.at(Tok::Eof) {
+                break;
+            }
+            arms.push(self.match_arm()?);
+            self.skip_newlines();
+        }
+        let end = self.peek().span.start;
+        self.expect(Tok::Dedent, "dedent")?;
+        Ok(Stmt::Match {
+            scrutinee,
+            arms,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn match_arm(&mut self) -> Result<MatchArm, LingoError> {
+        let start = self.peek().span.start;
+        let pattern = self.pattern()?;
+        self.expect(Tok::Colon, "`:` after pattern")?;
+        // arm body: either inline single statement on same line, or a block
+        let body = if matches!(self.peek_tok(), Tok::Newline) {
+            self.block()?
+        } else {
+            // inline single statement
+            let s = self.inline_stmt()?;
+            let b_span = match &s {
+                Stmt::Expr(e) => e.span,
+                Stmt::Return { span, .. } => *span,
+                Stmt::Break(sp) | Stmt::Continue(sp) => *sp,
+                _ => Span::new(start, start),
+            };
+            Block { stmts: vec![s], span: b_span }
+        };
+        let end = body.span.end;
+        Ok(MatchArm {
+            pattern,
+            body,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn inline_stmt(&mut self) -> Result<Stmt, LingoError> {
+        // a single statement on the same line as `pattern:`
+        match self.peek_tok() {
+            Tok::Return => self.return_stmt(),
+            Tok::Break => {
+                let span = self.advance().span;
+                self.expect(Tok::Newline, "newline")?;
+                Ok(Stmt::Break(span))
+            }
+            Tok::Continue => {
+                let span = self.advance().span;
+                self.expect(Tok::Newline, "newline")?;
+                Ok(Stmt::Continue(span))
+            }
+            _ => {
+                let e = self.expr()?;
+                self.expect(Tok::Newline, "newline")?;
+                Ok(Stmt::Expr(e))
+            }
+        }
+    }
+
+    fn pattern(&mut self) -> Result<Pattern, LingoError> {
+        let tok = self.peek().clone();
+        match tok.tok {
+            Tok::Ident(_) => {
+                let first = self.advance();
+                let first_name = match first.tok {
+                    Tok::Ident(s) => s,
+                    _ => unreachable!(),
+                };
+                let first_upper = first_name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+                if self.eat(Tok::Dot) {
+                    let v_tok = self.expect(Tok::Ident("".into()), "variant name after `.`")?;
+                    let variant = match v_tok.tok {
+                        Tok::Ident(s) => s,
+                        _ => unreachable!(),
+                    };
+                    let mut sub = Vec::new();
+                    if self.eat(Tok::LParen) {
+                        if !self.at(Tok::RParen) {
+                            loop {
+                                sub.push(self.pattern()?);
+                                if !self.eat(Tok::Comma) {
+                                    break;
+                                }
+                            }
+                        }
+                        self.expect(Tok::RParen, "`)`")?;
+                    }
+                    let end = self.peek().span.start;
+                    Ok(Pattern::Variant {
+                        type_name: Some(first_name),
+                        variant,
+                        sub,
+                        span: Span::new(first.span.start, end),
+                    })
+                } else if self.at(Tok::LParen) && !first_upper {
+                    // bare variant call like `some(x)` (option/result)
+                    self.advance();
+                    let mut sub = Vec::new();
+                    if !self.at(Tok::RParen) {
+                        loop {
+                            sub.push(self.pattern()?);
+                            if !self.eat(Tok::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Tok::RParen, "`)`")?;
+                    let end = self.peek().span.start;
+                    Ok(Pattern::Variant {
+                        type_name: None,
+                        variant: first_name,
+                        sub,
+                        span: Span::new(first.span.start, end),
+                    })
+                } else if first_name == "_" {
+                    Ok(Pattern::Wildcard(first.span))
+                } else if first_upper {
+                    // a bare uppercase identifier in pattern position = variant w/ no payload
+                    Ok(Pattern::Variant {
+                        type_name: None,
+                        variant: first_name,
+                        sub: Vec::new(),
+                        span: first.span,
+                    })
+                } else {
+                    Ok(Pattern::Bind(first_name, first.span))
+                }
+            }
+            Tok::None_ => {
+                self.advance();
+                Ok(Pattern::Variant {
+                    type_name: None,
+                    variant: "none".into(),
+                    sub: Vec::new(),
+                    span: tok.span,
+                })
+            }
+            Tok::True => {
+                self.advance();
+                Ok(Pattern::Literal(PatLit::Bool(true), tok.span))
+            }
+            Tok::False => {
+                self.advance();
+                Ok(Pattern::Literal(PatLit::Bool(false), tok.span))
+            }
+            Tok::Int(n) => {
+                self.advance();
+                Ok(Pattern::Literal(PatLit::Int(n), tok.span))
+            }
+            Tok::Str(s) => {
+                self.advance();
+                Ok(Pattern::Literal(PatLit::Str(s), tok.span))
+            }
+            Tok::Minus => {
+                self.advance();
+                let inner = self.expect(Tok::Int(0), "integer after `-`")?;
+                let n = match inner.tok {
+                    Tok::Int(n) => -n,
+                    _ => unreachable!(),
+                };
+                Ok(Pattern::Literal(PatLit::Int(n), Span::new(tok.span.start, inner.span.end)))
+            }
+            other => Err(LingoError::new(
+                Stage::Parse,
+                format!("expected a pattern, got {:?}", other),
+                tok.span,
+            )),
         }
     }
 
@@ -511,6 +850,17 @@ impl Parser {
                     kind: ExprKind::Call(Box::new(e), args),
                     span,
                 };
+            } else if self.eat(Tok::Dot) {
+                let name_tok = self.expect(Tok::Ident("".into()), "field or method name after `.`")?;
+                let name = match name_tok.tok {
+                    Tok::Ident(s) => s,
+                    _ => unreachable!(),
+                };
+                let span = Span::new(e.span.start, name_tok.span.end);
+                e = Expr {
+                    kind: ExprKind::Field(Box::new(e), name),
+                    span,
+                };
             } else {
                 break;
             }
@@ -597,8 +947,43 @@ impl Parser {
             }
             Tok::Ident(s) => {
                 self.advance();
+                // struct literal: `Name{field: value, ...}` (only if Name starts uppercase)
+                if self.at(Tok::LBrace)
+                    && s.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                {
+                    self.advance(); // consume `{`
+                    let mut fields = Vec::new();
+                    if !self.at(Tok::RBrace) {
+                        loop {
+                            let fname_tok =
+                                self.expect(Tok::Ident("".into()), "field name in struct literal")?;
+                            let fname = match fname_tok.tok {
+                                Tok::Ident(s) => s,
+                                _ => unreachable!(),
+                            };
+                            self.expect(Tok::Colon, "`:` after field name")?;
+                            let val = self.expr()?;
+                            fields.push((fname, val));
+                            if !self.eat(Tok::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(Tok::RBrace, "`}` to close struct literal")?;
+                    return Ok(Expr {
+                        kind: ExprKind::StructLit { name: s, fields },
+                        span: Span::new(tok.span.start, close.span.end),
+                    });
+                }
                 Ok(Expr {
                     kind: ExprKind::Ident(s),
+                    span: tok.span,
+                })
+            }
+            Tok::Self_ => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Self_,
                     span: tok.span,
                 })
             }
