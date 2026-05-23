@@ -1,0 +1,29 @@
+# `for ch in s:` — UTF-8 codepoint iteration, in native.
+# Each `ch` binds as a 1-codepoint `str`, exactly like the interpreter.
+
+fn is_digit(ch: str) -> bool:
+    let digits = "0123456789"
+    for d in digits:
+        if ch == d:
+            return true
+    return false
+
+fn count_digits(s: str) -> int:
+    let mut n = 0
+    for ch in s:
+        if is_digit(ch):
+            n = n + 1
+    return n
+
+fn reverse(s: str) -> str:
+    let mut out = ""
+    for ch in s:
+        out = ch + out
+    return out
+
+fn main():
+    print(count_digits("abc123def4567"))
+    print(reverse("hello"))
+    print(reverse("привет"))
+    for ch in "abc":
+        print(ch)
