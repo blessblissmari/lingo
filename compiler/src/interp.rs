@@ -1,13 +1,16 @@
 //! Tree-walking interpreter for lingo v0.1.
 //!
-//! Scope rules:
-//!   - lexical scopes, no closures (yet).
-//!   - `let` introduces a new binding.  shadowing in the same scope is a
-//!     hard error at runtime (until the resolver moves it earlier).
-//!   - `let mut` allows later assignment via `name = expr`.
-//!
-//! Control flow uses a small `Flow` enum threaded through statement
-//! evaluation.  Errors are surfaced as `LingoError` with `Stage::Runtime`.
+//! Currently supports:
+//!   - top-level fns, consts, structs, enums, impl blocks
+//!   - lexical scoping with **no shadowing** (compile-time-style runtime check)
+//!   - `let` / `let mut`, with `name = expr` reassignment of `mut` bindings
+//!   - `if` / `elif` / `else`, `for x in a..b`, `return`, `break`, `continue`
+//!   - `match` with literal, wildcard, bind, and `Type.Variant(...)` patterns
+//!   - struct literals `T{field: value, ...}` and field access `s.field`
+//!   - method dispatch `value.method(args)` via `impl Type:`
+//!   - keyword args (required when fn has >2 params)
+//!   - arithmetic, comparison, boolean ops, `**`, `%`, `..` ranges
+//!   - `print(...)` builtin
 
 use std::collections::HashMap;
 
@@ -21,18 +24,29 @@ pub enum Value {
     Bool(bool),
     Str(String),
     Range(i64, i64),
+    Struct {
+        type_name: String,
+        fields: HashMap<String, Value>,
+    },
+    Enum {
+        type_name: String,
+        variant: String,
+        payload: Vec<Value>,
+    },
     None_,
 }
 
 impl Value {
-    pub fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> String {
         match self {
-            Value::Int(_) => "int",
-            Value::Float(_) => "float",
-            Value::Bool(_) => "bool",
-            Value::Str(_) => "str",
-            Value::Range(_, _) => "range",
-            Value::None_ => "none",
+            Value::Int(_) => "int".into(),
+            Value::Float(_) => "float".into(),
+            Value::Bool(_) => "bool".into(),
+            Value::Str(_) => "str".into(),
+            Value::Range(_, _) => "range".into(),
+            Value::Struct { type_name, .. } => type_name.clone(),
+            Value::Enum { type_name, .. } => type_name.clone(),
+            Value::None_ => "none".into(),
         }
     }
 
@@ -43,7 +57,23 @@ impl Value {
             Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
             Value::Str(s) => s.clone(),
             Value::Range(a, b) => format!("{a}..{b}"),
-            Value::None_ => "none".to_string(),
+            Value::Struct { type_name, fields } => {
+                let mut parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.display()))
+                    .collect();
+                parts.sort();
+                format!("{type_name}{{{}}}", parts.join(", "))
+            }
+            Value::Enum { type_name, variant, payload } => {
+                if payload.is_empty() {
+                    format!("{type_name}.{variant}")
+                } else {
+                    let parts: Vec<String> = payload.iter().map(|v| v.display()).collect();
+                    format!("{type_name}.{variant}({})", parts.join(", "))
+                }
+            }
+            Value::None_ => "none".into(),
         }
     }
 }
@@ -71,6 +101,9 @@ struct Binding {
 pub struct Interp {
     fns: HashMap<String, FnDecl>,
     consts: HashMap<String, Value>,
+    structs: HashMap<String, StructDecl>,
+    enums: HashMap<String, EnumDecl>,
+    methods: HashMap<String, HashMap<String, FnDecl>>, // type -> method -> fn
     scopes: Vec<Scope>,
 }
 
@@ -87,11 +120,15 @@ impl Interp {
         Self {
             fns: HashMap::new(),
             consts: HashMap::new(),
+            structs: HashMap::new(),
+            enums: HashMap::new(),
+            methods: HashMap::new(),
             scopes: Vec::new(),
         }
     }
 
     pub fn run_program(&mut self, prog: &Program) -> Result<Value, LingoError> {
+        // first pass: register types and signatures
         for item in &prog.items {
             match item {
                 Item::Fn(f) => {
@@ -101,6 +138,49 @@ impl Interp {
                             format!("duplicate function `{}`", f.name),
                             f.span,
                         ));
+                    }
+                }
+                Item::Struct(s) => {
+                    if self.structs.insert(s.name.clone(), s.clone()).is_some() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("duplicate struct `{}`", s.name),
+                            s.span,
+                        ));
+                    }
+                }
+                Item::Enum(e) => {
+                    if self.enums.insert(e.name.clone(), e.clone()).is_some() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("duplicate enum `{}`", e.name),
+                            e.span,
+                        ));
+                    }
+                }
+                Item::Impl(_) | Item::Const(_) => {}
+            }
+        }
+        // second pass: register impl methods and evaluate consts
+        for item in &prog.items {
+            match item {
+                Item::Impl(b) => {
+                    if !self.structs.contains_key(&b.target) && !self.enums.contains_key(&b.target) {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("`impl` for unknown type `{}`", b.target),
+                            b.span,
+                        ));
+                    }
+                    let entry = self.methods.entry(b.target.clone()).or_default();
+                    for m in &b.methods {
+                        if entry.insert(m.name.clone(), m.clone()).is_some() {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("duplicate method `{}.{}`", b.target, m.name),
+                                m.span,
+                            ));
+                        }
                     }
                 }
                 Item::Const(c) => {
@@ -113,8 +193,10 @@ impl Interp {
                         ));
                     }
                 }
+                _ => {}
             }
         }
+
         let main = self
             .fns
             .get("main")
@@ -167,13 +249,12 @@ impl Interp {
                 decl.span,
             ));
         }
-        // each function call gets its own scope stack
         let saved = std::mem::take(&mut self.scopes);
         self.scopes.push(Scope { bindings: HashMap::new() });
         for (p, v) in decl.params.iter().zip(args.into_iter()) {
             self.scopes.last_mut().unwrap().bindings.insert(
                 p.name.clone(),
-                Binding { value: v, is_mut: false },
+                Binding { value: v, is_mut: p.name == "self" }, // self.field = ... allowed
             );
         }
         let flow = self.exec_block(&decl.body);
@@ -211,7 +292,6 @@ impl Interp {
         match s {
             Stmt::Let { is_mut, name, ty: _, value, span } => {
                 let v = self.eval(value)?;
-                // no shadowing
                 for scope in self.scopes.iter().rev() {
                     if scope.bindings.contains_key(name) {
                         return Err(LingoError::new(
@@ -237,24 +317,64 @@ impl Interp {
             }
             Stmt::Assign { target, value, span } => {
                 let v = self.eval(value)?;
-                for scope in self.scopes.iter_mut().rev() {
-                    if let Some(b) = scope.bindings.get_mut(target) {
-                        if !b.is_mut {
+                match target {
+                    AssignTarget::Name(name) => {
+                        for scope in self.scopes.iter_mut().rev() {
+                            if let Some(b) = scope.bindings.get_mut(name) {
+                                if !b.is_mut {
+                                    return Err(LingoError::new(
+                                        Stage::Runtime,
+                                        format!("cannot assign to immutable `{}` (declare with `let mut`)", name),
+                                        *span,
+                                    ));
+                                }
+                                b.value = v;
+                                return Ok(Flow::Normal);
+                            }
+                        }
+                        Err(LingoError::new(
+                            Stage::Runtime,
+                            format!("`{}` is not defined", name),
+                            *span,
+                        ))
+                    }
+                    AssignTarget::Field(obj_expr, fname) => {
+                        // only `self.field = ...` is supported in v0.1.1
+                        if !matches!(obj_expr.kind, ExprKind::Self_) {
                             return Err(LingoError::new(
                                 Stage::Runtime,
-                                format!("cannot assign to immutable `{}` (declare with `let mut`)", target),
+                                "in v0.1.1, only `self.field = ...` is allowed (no struct mutation through other handles yet)",
                                 *span,
                             ));
                         }
-                        b.value = v;
-                        return Ok(Flow::Normal);
+                        for scope in self.scopes.iter_mut().rev() {
+                            if let Some(b) = scope.bindings.get_mut("self") {
+                                if let Value::Struct { fields, .. } = &mut b.value {
+                                    if let Some(slot) = fields.get_mut(fname) {
+                                        *slot = v;
+                                        return Ok(Flow::Normal);
+                                    }
+                                    return Err(LingoError::new(
+                                        Stage::Runtime,
+                                        format!("no field `{}` on this struct", fname),
+                                        *span,
+                                    ));
+                                } else {
+                                    return Err(LingoError::new(
+                                        Stage::Runtime,
+                                        "`self` is not a struct",
+                                        *span,
+                                    ));
+                                }
+                            }
+                        }
+                        Err(LingoError::new(
+                            Stage::Runtime,
+                            "`self` is not in scope",
+                            *span,
+                        ))
                     }
                 }
-                Err(LingoError::new(
-                    Stage::Runtime,
-                    format!("`{}` is not defined", target),
-                    *span,
-                ))
             }
             Stmt::Return { value, .. } => {
                 let v = match value {
@@ -284,7 +404,7 @@ impl Interp {
                     Ok(Flow::Normal)
                 }
             }
-            Stmt::For { var, iter, body, span } => {
+            Stmt::For { var, iter, body, span: _ } => {
                 let it = self.eval(iter)?;
                 let (lo, hi) = match it {
                     Value::Range(a, b) => (a, b),
@@ -310,8 +430,24 @@ impl Interp {
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                     }
                 }
-                let _ = span;
                 Ok(Flow::Normal)
+            }
+            Stmt::Match { scrutinee, arms, span } => {
+                let v = self.eval(scrutinee)?;
+                for arm in arms {
+                    self.scopes.push(Scope { bindings: HashMap::new() });
+                    if self.pattern_match(&arm.pattern, &v)? {
+                        let flow = self.exec_block_inline(&arm.body)?;
+                        self.scopes.pop();
+                        return Ok(flow);
+                    }
+                    self.scopes.pop();
+                }
+                Err(LingoError::new(
+                    Stage::Runtime,
+                    format!("no match arm matched value of type {}", v.type_name()),
+                    *span,
+                ))
             }
             Stmt::Break(_) => Ok(Flow::Break),
             Stmt::Continue(_) => Ok(Flow::Continue),
@@ -322,7 +458,6 @@ impl Interp {
         }
     }
 
-    // exec a block without creating a new scope (caller already pushed one)
     fn exec_block_inline(&mut self, block: &Block) -> Result<Flow, LingoError> {
         let mut flow = Flow::Normal;
         for s in &block.stmts {
@@ -332,6 +467,76 @@ impl Interp {
             }
         }
         Ok(flow)
+    }
+
+    fn pattern_match(&mut self, pat: &Pattern, v: &Value) -> Result<bool, LingoError> {
+        match pat {
+            Pattern::Wildcard(_) => Ok(true),
+            Pattern::Bind(name, span) => {
+                // bind never fails; introduces a binding
+                let scope = self.scopes.last_mut().unwrap();
+                if scope.bindings.contains_key(name) {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("`{}` already bound in this scope", name),
+                        *span,
+                    ));
+                }
+                scope.bindings.insert(
+                    name.clone(),
+                    Binding { value: v.clone(), is_mut: false },
+                );
+                Ok(true)
+            }
+            Pattern::Literal(lit, _) => Ok(match (lit, v) {
+                (PatLit::Int(a), Value::Int(b)) => a == b,
+                (PatLit::Bool(a), Value::Bool(b)) => a == b,
+                (PatLit::Str(a), Value::Str(b)) => a == b,
+                _ => false,
+            }),
+            Pattern::Variant { type_name, variant, sub, span } => {
+                match v {
+                    Value::Enum { type_name: tn, variant: var, payload } => {
+                        if let Some(t) = type_name {
+                            if t != tn {
+                                return Ok(false);
+                            }
+                        }
+                        if variant != var {
+                            return Ok(false);
+                        }
+                        if sub.len() != payload.len() {
+                            return Err(LingoError::new(
+                                Stage::Runtime,
+                                format!(
+                                    "variant `{}` expects {} field(s), pattern has {}",
+                                    var, payload.len(), sub.len()
+                                ),
+                                *span,
+                            ));
+                        }
+                        for (p, val) in sub.iter().zip(payload.iter()) {
+                            if !self.pattern_match(p, val)? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    Value::None_ => Ok(type_name.is_none() && variant == "none" && sub.is_empty()),
+                    Value::Bool(b) => {
+                        // allow `true`/`false` to also be matched as bare variants
+                        if type_name.is_none()
+                            && ((variant == "true" && *b) || (variant == "false" && !*b))
+                        {
+                            Ok(true)
+                        } else {
+                            Ok(false)
+                        }
+                    }
+                    _ => Ok(false),
+                }
+            }
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
@@ -353,6 +558,9 @@ impl Interp {
             ExprKind::Str(s) => Ok(Value::Str(s.clone())),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::None_ => Ok(Value::None_),
+            ExprKind::Self_ => self.lookup("self").ok_or_else(|| {
+                LingoError::new(Stage::Runtime, "`self` is not in scope", e.span)
+            }),
             ExprKind::Ident(name) => self.lookup(name).ok_or_else(|| {
                 LingoError::new(
                     Stage::Runtime,
@@ -365,6 +573,78 @@ impl Interp {
                 "`print` can only be called, not used as a value",
                 e.span,
             )),
+            ExprKind::StructLit { name, fields } => {
+                let decl = self.structs.get(name).cloned().ok_or_else(|| {
+                    LingoError::new(
+                        Stage::Runtime,
+                        format!("unknown struct `{}`", name),
+                        e.span,
+                    )
+                })?;
+                let mut map = HashMap::new();
+                // every declared field must be set exactly once
+                for (fname, fexpr) in fields {
+                    if !decl.fields.iter().any(|f| &f.name == fname) {
+                        return Err(LingoError::new(
+                            Stage::Runtime,
+                            format!("struct `{}` has no field `{}`", name, fname),
+                            fexpr.span,
+                        ));
+                    }
+                    if map.contains_key(fname) {
+                        return Err(LingoError::new(
+                            Stage::Runtime,
+                            format!("field `{}` set twice", fname),
+                            fexpr.span,
+                        ));
+                    }
+                    let val = self.eval(fexpr)?;
+                    map.insert(fname.clone(), val);
+                }
+                for f in &decl.fields {
+                    if !map.contains_key(&f.name) {
+                        return Err(LingoError::new(
+                            Stage::Runtime,
+                            format!("missing field `{}` in struct literal", f.name),
+                            e.span,
+                        ));
+                    }
+                }
+                Ok(Value::Struct {
+                    type_name: name.clone(),
+                    fields: map,
+                })
+            }
+            ExprKind::Field(lhs, name) => {
+                // `Type.Variant` (nullary enum variant)
+                if let ExprKind::Ident(type_name) = &lhs.kind {
+                    if let Some(enum_decl) = self.enums.get(type_name).cloned() {
+                        if enum_decl.variants.iter().any(|v| &v.name == name) {
+                            return Ok(Value::Enum {
+                                type_name: type_name.clone(),
+                                variant: name.clone(),
+                                payload: Vec::new(),
+                            });
+                        }
+                        // fall through to error
+                    }
+                }
+                let v = self.eval(lhs)?;
+                match v {
+                    Value::Struct { fields, .. } => fields.get(name).cloned().ok_or_else(|| {
+                        LingoError::new(
+                            Stage::Runtime,
+                            format!("no field `{}`", name),
+                            e.span,
+                        )
+                    }),
+                    other => Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("cannot read `.{}` on {}", name, other.type_name()),
+                        e.span,
+                    )),
+                }
+            }
             ExprKind::Unary(op, inner) => {
                 let v = self.eval(inner)?;
                 match (op, v) {
@@ -379,55 +659,44 @@ impl Interp {
                 }
             }
             ExprKind::Binary(op, l, r) => {
-                // short-circuit and / or
                 match op {
                     BinOp::And => {
                         let lv = self.eval(l)?;
-                        match lv {
-                            Value::Bool(false) => return Ok(Value::Bool(false)),
-                            Value::Bool(true) => {
-                                let rv = self.eval(r)?;
-                                if let Value::Bool(b) = rv {
-                                    return Ok(Value::Bool(b));
-                                }
-                                return Err(LingoError::new(
-                                    Stage::Runtime,
-                                    "`and` requires bool on both sides",
-                                    r.span,
-                                ));
-                            }
-                            v => {
-                                return Err(LingoError::new(
+                        return match lv {
+                            Value::Bool(false) => Ok(Value::Bool(false)),
+                            Value::Bool(true) => match self.eval(r)? {
+                                Value::Bool(b) => Ok(Value::Bool(b)),
+                                v => Err(LingoError::new(
                                     Stage::Runtime,
                                     format!("`and` requires bool, got {}", v.type_name()),
-                                    l.span,
-                                ))
-                            }
-                        }
+                                    r.span,
+                                )),
+                            },
+                            v => Err(LingoError::new(
+                                Stage::Runtime,
+                                format!("`and` requires bool, got {}", v.type_name()),
+                                l.span,
+                            )),
+                        };
                     }
                     BinOp::Or => {
                         let lv = self.eval(l)?;
-                        match lv {
-                            Value::Bool(true) => return Ok(Value::Bool(true)),
-                            Value::Bool(false) => {
-                                let rv = self.eval(r)?;
-                                if let Value::Bool(b) = rv {
-                                    return Ok(Value::Bool(b));
-                                }
-                                return Err(LingoError::new(
-                                    Stage::Runtime,
-                                    "`or` requires bool on both sides",
-                                    r.span,
-                                ));
-                            }
-                            v => {
-                                return Err(LingoError::new(
+                        return match lv {
+                            Value::Bool(true) => Ok(Value::Bool(true)),
+                            Value::Bool(false) => match self.eval(r)? {
+                                Value::Bool(b) => Ok(Value::Bool(b)),
+                                v => Err(LingoError::new(
                                     Stage::Runtime,
                                     format!("`or` requires bool, got {}", v.type_name()),
-                                    l.span,
-                                ))
-                            }
-                        }
+                                    r.span,
+                                )),
+                            },
+                            v => Err(LingoError::new(
+                                Stage::Runtime,
+                                format!("`or` requires bool, got {}", v.type_name()),
+                                l.span,
+                            )),
+                        };
                     }
                     _ => {}
                 }
@@ -458,127 +727,225 @@ impl Interp {
                 };
                 Ok(Value::Range(a, b))
             }
-            ExprKind::Call(callee, args) => {
-                // evaluate args
-                if matches!(callee.kind, ExprKind::PrintBuiltin) {
-                    let mut out = String::new();
-                    for (i, a) in args.iter().enumerate() {
-                        if a.name.is_some() {
-                            return Err(LingoError::new(
-                                Stage::Runtime,
-                                "`print` does not take keyword arguments",
-                                a.span,
-                            ));
-                        }
-                        if i > 0 {
-                            out.push(' ');
-                        }
-                        let v = self.eval(&a.value)?;
-                        out.push_str(&v.display());
-                    }
-                    println!("{out}");
-                    return Ok(Value::None_);
+            ExprKind::Call(callee, args) => self.eval_call(callee, args, e.span),
+        }
+    }
+
+    fn eval_call(&mut self, callee: &Expr, args: &[Arg], call_span: Span) -> Result<Value, LingoError> {
+        // print builtin
+        if matches!(callee.kind, ExprKind::PrintBuiltin) {
+            let mut out = String::new();
+            for (i, a) in args.iter().enumerate() {
+                if a.name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Runtime,
+                        "`print` does not take keyword arguments",
+                        a.span,
+                    ));
                 }
-                let name = match &callee.kind {
-                    ExprKind::Ident(s) => s.clone(),
-                    _ => {
-                        return Err(LingoError::new(
-                            Stage::Runtime,
-                            "can only call named functions in v0.1",
-                            callee.span,
-                        ))
-                    }
-                };
-                let decl = self
-                    .fns
-                    .get(&name)
-                    .cloned()
-                    .ok_or_else(|| {
-                        LingoError::new(
-                            Stage::Runtime,
-                            format!("function `{}` is not defined", name),
-                            callee.span,
-                        )
-                    })?;
-                // resolve args: support positional and keyword
-                let mut resolved: Vec<Option<Value>> = vec![None; decl.params.len()];
-                let mut positional_idx = 0usize;
-                let arg_count = args.len();
-                // keyword-required-when->2 rule:
-                if decl.params.len() > 2 {
-                    if args.iter().any(|a| a.name.is_none()) {
-                        return Err(LingoError::new(
-                            Stage::Runtime,
-                            format!(
-                                "function `{}` has {} params; pass all as keyword args (`name: value`)",
-                                name,
-                                decl.params.len()
-                            ),
-                            e.span,
-                        ));
-                    }
+                if i > 0 {
+                    out.push(' ');
                 }
-                for a in args {
-                    let v = self.eval(&a.value)?;
-                    if let Some(n) = &a.name {
-                        let idx = decl.params.iter().position(|p| &p.name == n).ok_or_else(|| {
-                            LingoError::new(
-                                Stage::Runtime,
-                                format!("`{}` has no parameter `{}`", name, n),
-                                a.span,
-                            )
-                        })?;
-                        if resolved[idx].is_some() {
+                let v = self.eval(&a.value)?;
+                out.push_str(&v.display());
+            }
+            println!("{out}");
+            return Ok(Value::None_);
+        }
+
+        // Type.Variant(args) — enum variant construction
+        if let ExprKind::Field(lhs, vname) = &callee.kind {
+            if let ExprKind::Ident(type_name) = &lhs.kind {
+                if let Some(enum_decl) = self.enums.get(type_name).cloned() {
+                    if let Some(variant) = enum_decl.variants.iter().find(|v| &v.name == vname) {
+                        if args.iter().any(|a| a.name.is_some()) {
                             return Err(LingoError::new(
                                 Stage::Runtime,
-                                format!("argument `{}` passed twice", n),
-                                a.span,
+                                "enum variant arguments must be positional",
+                                call_span,
                             ));
                         }
-                        resolved[idx] = Some(v);
-                    } else {
-                        if positional_idx >= decl.params.len() {
-                            return Err(LingoError::new(
-                                Stage::Runtime,
-                                format!("too many positional arguments to `{}`", name),
-                                a.span,
-                            ));
-                        }
-                        if resolved[positional_idx].is_some() {
+                        if args.len() != variant.payload.len() {
                             return Err(LingoError::new(
                                 Stage::Runtime,
                                 format!(
-                                    "positional argument collides with a keyword for `{}`",
-                                    decl.params[positional_idx].name
+                                    "variant `{}.{}` expects {} value(s), got {}",
+                                    type_name, vname, variant.payload.len(), args.len()
                                 ),
-                                a.span,
+                                call_span,
                             ));
                         }
-                        resolved[positional_idx] = Some(v);
-                        positional_idx += 1;
+                        let mut values = Vec::new();
+                        for a in args {
+                            values.push(self.eval(&a.value)?);
+                        }
+                        return Ok(Value::Enum {
+                            type_name: type_name.clone(),
+                            variant: vname.clone(),
+                            payload: values,
+                        });
                     }
-                }
-                if let Some((i, _)) = resolved.iter().enumerate().find(|(_, v)| v.is_none()) {
+                    // it's a static method on the enum type
+                    if let Some(decl) = self.methods.get(type_name).and_then(|m| m.get(vname)).cloned() {
+                        let values = self.resolve_args(&decl, args, call_span)?;
+                        return self.call_fn(&decl, values);
+                    }
                     return Err(LingoError::new(
                         Stage::Runtime,
-                        format!(
-                            "missing argument `{}` in call to `{}` ({} param(s), {} given)",
-                            decl.params[i].name, name, decl.params.len(), arg_count
-                        ),
-                        e.span,
+                        format!("no variant or method `{}` on enum `{}`", vname, type_name),
+                        callee.span,
                     ));
                 }
-                let values: Vec<Value> = resolved.into_iter().map(|v| v.unwrap()).collect();
-                self.call_fn(&decl, values)
+                if self.structs.contains_key(type_name) {
+                    // static method: `Type.method(args)`
+                    if let Some(decl) = self.methods.get(type_name).and_then(|m| m.get(vname)).cloned() {
+                        let values = self.resolve_args(&decl, args, call_span)?;
+                        return self.call_fn(&decl, values);
+                    }
+                    return Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("no method `{}` on struct `{}`", vname, type_name),
+                        callee.span,
+                    ));
+                }
+            }
+            // method call on a value: receiver.method(args)
+            let receiver = self.eval(lhs)?;
+            let type_name = match &receiver {
+                Value::Struct { type_name, .. } => type_name.clone(),
+                Value::Enum { type_name, .. } => type_name.clone(),
+                v => {
+                    return Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("cannot call methods on {}", v.type_name()),
+                        callee.span,
+                    ))
+                }
+            };
+            let decl = self
+                .methods
+                .get(&type_name)
+                .and_then(|m| m.get(vname))
+                .cloned()
+                .ok_or_else(|| {
+                    LingoError::new(
+                        Stage::Runtime,
+                        format!("no method `{}` on `{}`", vname, type_name),
+                        callee.span,
+                    )
+                })?;
+            // method must take self as first param
+            if decl.params.first().map(|p| p.name.as_str()) != Some("self") {
+                return Err(LingoError::new(
+                    Stage::Runtime,
+                    format!("`{}.{}` is a static method; call it as `{}.{}(...)` not `x.{}(...)`",
+                            type_name, vname, type_name, vname, vname),
+                    callee.span,
+                ));
+            }
+            // resolve remaining args
+            let rest_decl = FnDecl {
+                params: decl.params[1..].to_vec(),
+                ..decl.clone()
+            };
+            let mut values = vec![receiver];
+            let rest_values = self.resolve_args(&rest_decl, args, call_span)?;
+            values.extend(rest_values);
+            return self.call_fn(&decl, values);
+        }
+
+        let name = match &callee.kind {
+            ExprKind::Ident(s) => s.clone(),
+            _ => {
+                return Err(LingoError::new(
+                    Stage::Runtime,
+                    "can only call named functions in v0.1",
+                    callee.span,
+                ))
+            }
+        };
+        let decl = self
+            .fns
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| {
+                LingoError::new(
+                    Stage::Runtime,
+                    format!("function `{}` is not defined", name),
+                    callee.span,
+                )
+            })?;
+        let values = self.resolve_args(&decl, args, call_span)?;
+        self.call_fn(&decl, values)
+    }
+
+    fn resolve_args(
+        &mut self,
+        decl: &FnDecl,
+        args: &[Arg],
+        call_span: Span,
+    ) -> Result<Vec<Value>, LingoError> {
+        if decl.params.len() > 2 && args.iter().any(|a| a.name.is_none()) {
+            return Err(LingoError::new(
+                Stage::Runtime,
+                format!(
+                    "function `{}` has {} params; pass all as keyword args (`name: value`)",
+                    decl.name,
+                    decl.params.len()
+                ),
+                call_span,
+            ));
+        }
+        let mut resolved: Vec<Option<Value>> = vec![None; decl.params.len()];
+        let mut positional_idx = 0usize;
+        let arg_count = args.len();
+        for a in args {
+            let v = self.eval(&a.value)?;
+            if let Some(n) = &a.name {
+                let idx = decl.params.iter().position(|p| &p.name == n).ok_or_else(|| {
+                    LingoError::new(
+                        Stage::Runtime,
+                        format!("`{}` has no parameter `{}`", decl.name, n),
+                        a.span,
+                    )
+                })?;
+                if resolved[idx].is_some() {
+                    return Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("argument `{}` passed twice", n),
+                        a.span,
+                    ));
+                }
+                resolved[idx] = Some(v);
+            } else {
+                if positional_idx >= decl.params.len() {
+                    return Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("too many positional arguments to `{}`", decl.name),
+                        a.span,
+                    ));
+                }
+                resolved[positional_idx] = Some(v);
+                positional_idx += 1;
             }
         }
+        if let Some((i, _)) = resolved.iter().enumerate().find(|(_, v)| v.is_none()) {
+            return Err(LingoError::new(
+                Stage::Runtime,
+                format!(
+                    "missing argument `{}` in call to `{}` ({} param(s), {} given)",
+                    decl.params[i].name, decl.name, decl.params.len(), arg_count
+                ),
+                call_span,
+            ));
+        }
+        Ok(resolved.into_iter().map(|v| v.unwrap()).collect())
     }
 }
 
 fn bin_op(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, LingoError> {
     use BinOp::*;
     use Value::*;
-    // promote int->float when one side is float
     let promote = matches!(&l, Float(_)) || matches!(&r, Float(_));
     if promote {
         let lf = match &l {
