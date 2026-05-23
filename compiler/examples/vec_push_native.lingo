@@ -1,0 +1,21 @@
+# Owning vec + push/pop/set, all native via the C backend.
+# Was interp-only through v0.1.16; native in v0.1.17.
+
+fn main():
+    let mut xs: vec[i64] = vec[]
+    for i in 0..5:
+        xs.push(i * i)
+    print(f"len={xs.len()}")
+    for i in 0..xs.len():
+        print(xs.get(i))
+
+    # mutate in place
+    xs.set(2, 99)
+    print("after set[2]=99:")
+    for i in 0..xs.len():
+        print(xs.get(i))
+
+    # pop returns the last element
+    let last = xs.pop()
+    print(f"popped={last}, len={xs.len()}")
+    print(xs.get(xs.len() - 1))
