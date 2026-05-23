@@ -1,0 +1,30 @@
+//! lingoc — the bootstrap compiler for the lingo language.
+//!
+//! Currently exposes a tree-walking interpreter only.  The path to a real
+//! native compiler runs through this same crate:
+//!
+//!   v0.1.x: lexer + parser + interpreter   ← we are here
+//!   v0.2.x: mid-ir (ssa) + llvm backend
+//!   v0.3.x: stdlib
+//!   v0.4.x: tooling (fmt, lsp, test)
+//!   v1.0.x: self-host
+//!
+//! see ROADMAP.md and docs/DECISIONS.md in the repo root.
+
+pub mod ast;
+pub mod error;
+pub mod interp;
+pub mod lexer;
+pub mod parser;
+
+pub use error::{LingoError, Stage};
+
+/// Run a lingo source string as if it were the whole program.
+/// `filename` is only used for error messages.
+pub fn run(source: &str, filename: &str) -> Result<(), String> {
+    let tokens = lexer::lex(source).map_err(|e| e.render(source, filename))?;
+    let program = parser::parse(tokens).map_err(|e| e.render(source, filename))?;
+    let mut interp = interp::Interp::new();
+    interp.run_program(&program).map_err(|e| e.render(source, filename))?;
+    Ok(())
+}
