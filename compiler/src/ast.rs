@@ -233,6 +233,10 @@ pub enum ExprKind {
     MapLit(Vec<(Expr, Expr)>),
     FString(Vec<FStringPart>),
     Try(Box<Expr>), // postfix `?` — propagate error from a fallible call
+    /// `forever` — only legal as the iterable of `for _ in forever:`.
+    /// Lowered to an infinite loop. Not a value; cannot be assigned, returned,
+    /// printed, etc.
+    Forever,
 }
 
 #[derive(Debug, Clone)]

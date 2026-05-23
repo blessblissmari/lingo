@@ -1171,6 +1171,13 @@ impl Parser {
                     span: tok.span,
                 })
             }
+            Tok::Forever => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Forever,
+                    span: tok.span,
+                })
+            }
             Tok::Ident(s) => {
                 self.advance();
                 // vec literal: `vec[a, b, c]`

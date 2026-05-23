@@ -1,0 +1,35 @@
+# forever.lingo — the canonical infinite-loop shape.
+#
+# `for _ in forever:` is the only loop form for "do this until something
+# inside the body says stop".  there is no `while`, no `loop`, no `do…while`.
+# break, continue, and `return` all work as expected; a function-returning
+# `return` inside a forever loop exits the function too.
+
+fn count_down_to_zero(start: i64) -> i64:
+    let mut n = start
+    for _ in forever:
+        if n == 0:
+            return n
+        n = n - 1
+    return -1   # unreachable, but the parser doesn't know that yet
+
+fn first_square_above(threshold: i64) -> i64:
+    let mut i = 0
+    for _ in forever:
+        let sq = i * i
+        if sq > threshold:
+            return sq
+        i = i + 1
+    return -1
+
+fn main():
+    print(count_down_to_zero(5))
+    print(first_square_above(100))
+    # break out by hand
+    let mut n = 0
+    for _ in forever:
+        if n >= 3:
+            break
+        print(n)
+        n = n + 1
+    print("done")
