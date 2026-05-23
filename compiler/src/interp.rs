@@ -436,9 +436,25 @@ impl Interp {
                         }
                     }
                     // every required (no-default) trait method must be implemented
+                    //
+                    // v0.2.6: also check that the impl method's
+                    // signature matches the trait method's signature
+                    // after substituting `type_params[i] ->
+                    // trait_args[i]` and `Self -> target`.  Mirrors the
+                    // identical check in the C backend.
+                    let subst = crate::ast::build_trait_subst(
+                        &trait_decl.type_params,
+                        &b.trait_args,
+                        &b.target,
+                    );
                     let mut resolved: HashMap<String, FnDecl> = HashMap::new();
                     for tm in &trait_decl.methods {
                         if let Some(m) = impl_by_name.get(&tm.decl.name) {
+                            if let Err(msg) = crate::ast::check_trait_method_sig(
+                                &b.trait_name, &b.target, &tm.decl, m, &subst,
+                            ) {
+                                return Err(LingoError::new(Stage::Resolve, msg, m.span));
+                            }
                             resolved.insert(tm.decl.name.clone(), m.clone());
                         } else if tm.has_default {
                             resolved.insert(tm.decl.name.clone(), tm.decl.clone());
