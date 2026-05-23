@@ -1109,6 +1109,12 @@ impl Codegen {
                 //   `for _ in forever:` — infinite loop (while(1))
                 //   `for i in lo..hi`   — integer range
                 //   `for x in vec_i64`  — iterate a vec[i64] / vec[str] / vec[Struct] / ...
+                //
+                // v0.1.28: the for-loop variable is a fresh binding — apply the
+                // same no-shadowing rule as `let`.  Use `iter.span` so the
+                // diagnostic points at the iterable (consistent with the rest
+                // of the for-loop's error messages).
+                self.check_no_shadow(var, iter.span)?;
                 if matches!(iter.kind, ExprKind::Forever) {
                     if var != "_" {
                         return Err(LingoError::new(
@@ -1319,6 +1325,12 @@ impl Codegen {
                         match sp {
                             Pattern::Wildcard(_) => {}
                             Pattern::Bind(name, sp_span) => {
+                                // v0.1.28: match-arm binds get the same
+                                // no-shadow treatment as `let`.  The per-arm
+                                // scope is on top; `check_no_shadow` walks
+                                // the whole stack so an outer-scope binding
+                                // of the same name is still flagged.
+                                self.check_no_shadow(name, *sp_span)?;
                                 let ty = map_type_with(
                                     &v.payload[i],
                                     *sp_span,
@@ -1360,7 +1372,9 @@ impl Codegen {
                     writeln!(self.body, "{}}}", self.pad()).unwrap();
                     had_default = true;
                 }
-                Pattern::Bind(name, _) => {
+                Pattern::Bind(name, bind_span) => {
+                    // v0.1.28: catch-all bind shadowing (same rule as `let`).
+                    self.check_no_shadow(name, *bind_span)?;
                     writeln!(self.body, "{}default: {{", self.pad()).unwrap();
                     self.indent += 1;
                     self.scopes.push(HashMap::new());
@@ -1443,7 +1457,10 @@ impl Codegen {
                     self.indent -= 1;
                     writeln!(self.body, "{}}}", self.pad()).unwrap();
                 }
-                Pattern::Bind(name, _) => {
+                Pattern::Bind(name, bind_span) => {
+                    // v0.1.28: catch-all bind on a `T!E` scrutinee — same
+                    // no-shadow rule as `let`.
+                    self.check_no_shadow(name, *bind_span)?;
                     writeln!(self.body, "{}{{", self.pad()).unwrap();
                     self.indent += 1;
                     self.scopes.push(HashMap::new());
@@ -1480,7 +1497,10 @@ impl Codegen {
                             self.scopes.push(HashMap::new());
                             match &sub[0] {
                                 Pattern::Wildcard(_) => {}
-                                Pattern::Bind(bname, _) => {
+                                Pattern::Bind(bname, bname_span) => {
+                                    // v0.1.28: `ok(bname)` bind shadows the
+                                    // same as a `let bname`.
+                                    self.check_no_shadow(bname, *bname_span)?;
                                     let mb = c_local_ident(bname);
                                     writeln!(self.body, "{}{} {} = {}.ok; (void){};",
                                              self.pad(), t.c_decl(), mb, tmp, mb).unwrap();
@@ -1519,7 +1539,9 @@ impl Codegen {
                                     self.indent -= 1;
                                     writeln!(self.body, "{}}}", self.pad()).unwrap();
                                 }
-                                Pattern::Bind(bname, _) => {
+                                Pattern::Bind(bname, bname_span) => {
+                                    // v0.1.28: `err(bname)` bind — same rule.
+                                    self.check_no_shadow(bname, *bname_span)?;
                                     writeln!(self.body, "{}if ({}.is_err) {{", self.pad(), tmp).unwrap();
                                     self.indent += 1;
                                     self.scopes.push(HashMap::new());
@@ -1564,7 +1586,11 @@ impl Codegen {
                                     for (i, sp) in v_sub.iter().enumerate() {
                                         match sp {
                                             Pattern::Wildcard(_) => {}
-                                            Pattern::Bind(bname, _) => {
+                                            Pattern::Bind(bname, bname_span) => {
+                                                // v0.1.28: nested bind inside
+                                                // `err(Variant(bname))` — same
+                                                // no-shadow rule as `let`.
+                                                self.check_no_shadow(bname, *bname_span)?;
                                                 let pty = map_type_with(
                                                     &variant_decl.payload[i],
                                                     *v_span,
