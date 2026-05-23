@@ -35,6 +35,7 @@ pub struct FnDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Option<TypeRef>,
+    pub raises: Option<TypeRef>, // `! E` after the return type — fallible fn
     pub body: Block,
     pub span: Span,
 }
@@ -120,6 +121,10 @@ pub enum Stmt {
         value: Option<Expr>,
         span: Span,
     },
+    Raise {
+        value: Expr,
+        span: Span,
+    },
     If {
         arms: Vec<(Expr, Block)>,
         else_block: Option<Block>,
@@ -200,6 +205,7 @@ pub enum ExprKind {
         fields: Vec<(String, Expr)>,
     },
     VecLit(Vec<Expr>),
+    Try(Box<Expr>), // postfix `?` — propagate error from a fallible call
 }
 
 #[derive(Debug, Clone)]
