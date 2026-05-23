@@ -4,11 +4,12 @@
 //!     lingo path/to/file.lingo        # run the file (tree-walking interpreter)
 //!     lingo build path/file.lingo     # lower to C, compile with gcc, emit native binary
 //!     lingo emit-c path/file.lingo    # dump the generated C source to stdout
+//!     lingo repl                      # interactive REPL (tree-walking interpreter)
 //!     lingo --tokens path/file.lingo  # dump the token stream
 //!     lingo --ast    path/file.lingo  # dump the parsed AST
 //!     lingo --version                 # print version
 //!
-//! Anything else (lsp, fmt, test, repl) is a v0.2+ feature.
+//! Anything else (lsp, fmt, test) is a v0.2+ feature.
 
 use std::process::ExitCode;
 
@@ -21,6 +22,15 @@ fn main() -> ExitCode {
     if args[1] == "--version" {
         println!("lingo {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    if args[1] == "repl" {
+        return match lingoc::repl::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("repl error: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     let (mode, path, prog_args) = match args[1].as_str() {
