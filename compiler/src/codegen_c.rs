@@ -92,9 +92,15 @@ impl CType {
                 other => panic!("unsupported map key/value types in codegen: {:?}", other),
             },
             CType::Result(t, e) => {
+                // v0.2.0: E can be an enum *or* `str` — the latter unblocks
+                // builtins like `int(s) -> int!str` whose error is a plain
+                // diagnostic string with no enum nature.  We encode the str
+                // case with the `"str"` mono-suffix (collision-free: enum
+                // names are PascalCase by convention).
                 let e_name = match e.as_ref() {
                     CType::Enum(n) => n.clone(),
-                    other => panic!("Result error type must be an enum, got {:?}", other),
+                    CType::Str => "str".to_string(),
+                    other => panic!("Result error type must be an enum or `str`, got {:?}", other),
                 };
                 format!("lingo_result_{}_{}_t", t.mono_suffix(), e_name)
             }
@@ -360,6 +366,12 @@ impl Codegen {
 
     /// Compile a whole program to a self-contained C99 source file.
     pub fn gen_program(mut self, prog: &Program) -> Result<String, LingoError> {
+        // v0.2.0: always reserve the `lingo_result_i64_str_t` typedef so the
+        // `lingo_int_parse` runtime helper (spliced unconditionally by
+        // `emit()`) sees its return type even when no user code calls
+        // `int(s)`.  Both the typedef and the helper are
+        // `__attribute__((unused))`, so the C compiler won't complain.
+        self.result_pairs.insert(("i64".to_string(), "str".to_string()));
         // v0.1.18: traits + `impl Trait for Type` are lowered to ordinary
         // `Item::Impl` blocks (static dispatch only — no `&dyn` polymorphism
         // yet).  Required methods come from the impl block; missing methods
@@ -573,9 +585,12 @@ impl Codegen {
         for (t_sfx, e_name) in &pairs {
             let t_c = mono_suffix_to_c_decl(t_sfx, &self.structs, &self.enums);
             let v = format!("lingo_result_{}_{}_t", t_sfx, e_name);
+            // v0.2.0: the literal e_name `"str"` represents a `! str` raise
+            // (errors are bare C strings).  Everything else is an enum name.
+            let e_c: &str = if e_name == "str" { "const char*" } else { e_name.as_str() };
             writeln!(self.type_defs,
                 "typedef struct {{ bool is_err; {t} ok; {e} err; }} {v};",
-                t = t_c, e = e_name, v = v).unwrap();
+                t = t_c, e = e_c, v = v).unwrap();
         }
 
         // Pass 3: emit prototypes and bodies.
@@ -621,6 +636,7 @@ impl Codegen {
         out.push_str("#include <string.h>\n"); // strlen/strcmp/strstr/memcpy (str runtime, v0.1.13)
         out.push_str("#include <stdlib.h>\n"); // malloc (str runtime, v0.1.13)
         out.push_str("#include <stdarg.h>\n"); // va_list (lingo_fmt_alloc, v0.1.13)
+        out.push_str("#include <errno.h>\n"); // strtoll's ERANGE (lingo_int_parse, v0.2.0)
         out.push_str("\n");
         // Tiny built-in runtime types — typedef'd up front so user code and
         // generated method calls can refer to them by name.  Read-only vec
@@ -634,6 +650,12 @@ impl Codegen {
         if !self.type_defs.is_empty() {
             out.push_str(&self.type_defs);
         }
+        // v0.2.0: sentinel comment marking the end of all typedefs.  The
+        // `emit()` post-pass splices the runtime-helper block right before
+        // this line so helpers (e.g. `lingo_int_parse`) can reference
+        // monomorphized result typedefs that aren't part of the static
+        // prelude.
+        out.push_str("/* === lingo runtime helpers === */\n");
         out.push_str(&self.protos);
         out.push_str("\n");
         out.push_str(&self.body);
@@ -677,9 +699,15 @@ impl Codegen {
                 CType::Enum(name) => {
                     self.result_pairs.insert((ret_ok.mono_suffix(), name.clone()));
                 }
+                CType::Str => {
+                    // v0.2.0: `! str` is allowed — the result struct's err
+                    // field becomes `const char*`.  We use the literal
+                    // suffix `"str"` as the e_name in `result_pairs`.
+                    self.result_pairs.insert((ret_ok.mono_suffix(), "str".to_string()));
+                }
                 other => return Err(LingoError::new(
                     Stage::Resolve,
-                    format!("C backend: `! E` requires E to be an enum, got `{}`", other.c_decl()),
+                    format!("C backend: `! E` requires E to be an enum or `str`, got `{}`", other.c_decl()),
                     f.span,
                 )),
             }
@@ -741,15 +769,31 @@ impl Codegen {
                 }
                 None
             }
-            ExprKind::Call(callee, _) => {
+            ExprKind::Call(callee, args) => {
                 match &callee.kind {
                     ExprKind::Ident(fname) => {
                         if let Some((_, ret)) = self.fn_sigs.get(fname) {
                             return Some(ret.clone());
                         }
                         // Type casts as fns: int / float / str / bool.
+                        // v0.2.0: `int(s: str)` is special — returns `int!str`
+                        // instead of `int`, so the empty-vec pre-pass and
+                        // any other consumer of ast_infer_ty sees the right
+                        // shape.
                         match fname.as_str() {
-                            "int" => Some(CType::I64),
+                            "int" => {
+                                if args.len() == 1 && args[0].name.is_none() {
+                                    if let Some(arg_ty) = self.ast_infer_ty(&args[0].value, vars) {
+                                        if matches!(arg_ty, CType::Str) {
+                                            return Some(CType::Result(
+                                                Box::new(CType::I64),
+                                                Box::new(CType::Str),
+                                            ));
+                                        }
+                                    }
+                                }
+                                Some(CType::I64)
+                            }
                             "float" => Some(CType::F64),
                             "str" => Some(CType::Str),
                             "bool" => Some(CType::Bool),
@@ -1435,15 +1479,18 @@ impl Codegen {
         _span: Span,
     ) -> Result<(), LingoError> {
         let res_ty = CType::Result(Box::new(t.clone()), Box::new(e.clone()));
-        let e_name = match &e {
-            CType::Enum(n) => n.clone(),
+        // v0.2.0: `e` can be either an enum or `str`.  For str-errors we
+        // skip the enum-decl lookup and forbid variant patterns inside
+        // `err(...)` (since there are no variants to match against).
+        let (e_name, decl): (String, Option<EnumDecl>) = match &e {
+            CType::Enum(n) => (n.clone(), self.enums.get(n).cloned()),
+            CType::Str => ("str".to_string(), None),
             other => return Err(LingoError::new(
                 Stage::Resolve,
-                format!("internal: result error type is not an enum: {}", other.c_decl()),
+                format!("internal: result error type is not an enum or str: {}", other.c_decl()),
                 Span::dummy(),
             )),
         };
-        let decl = self.enums.get(&e_name).cloned().unwrap();
         let tmp = format!("__match_{}", self.tmp_counter);
         self.tmp_counter += 1;
         writeln!(self.body, "{}{} {} = {};",
@@ -1560,6 +1607,18 @@ impl Codegen {
                                     writeln!(self.body, "{}}}", self.pad()).unwrap();
                                 }
                                 Pattern::Variant { type_name: vt_name, variant: v_name, sub: v_sub, span: v_span } => {
+                                    // v0.2.0: `! str` has no enum decl —
+                                    // reject variant patterns with a clear
+                                    // diagnostic so users know to use
+                                    // `err(_)` or `err(bind)` instead.
+                                    let Some(ref decl) = decl else {
+                                        return Err(LingoError::new(
+                                            Stage::Resolve,
+                                            format!("C backend: error type is `str`, cannot match against variant `{}.{}` — use `err(_)` or `err(name)` to bind the error string",
+                                                    vt_name.clone().unwrap_or_default(), v_name),
+                                            *v_span,
+                                        ));
+                                    };
                                     if let Some(tn) = vt_name {
                                         if tn != &e_name {
                                             return Err(LingoError::new(
@@ -2769,6 +2828,36 @@ impl Codegen {
     }
 
     fn gen_call(&mut self, callee: &Expr, args: &[Arg], span: Span) -> Result<(String, CType), LingoError> {
+        // v0.2.0: builtin `int(x)` — handled before generic call dispatch.
+        //   - `int(s: str) -> int ! str`    parse base-10, error is a static C string
+        //   - `int(n: int) -> int`          identity
+        //   - `int(f: float) -> int`        truncating cast
+        //   - `int(b: bool) -> int`         0/1
+        // No keyword args, exactly one positional arg.
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "int" && args.len() == 1 && args[0].name.is_none() {
+                let (arg_code, arg_ty) = self.gen_expr(&args[0].value)?;
+                match arg_ty {
+                    CType::Str => {
+                        // Register the (i64, str) result pair so the typedef
+                        // gets emitted, even if no user fn declares `! str`.
+                        self.result_pairs.insert(("i64".to_string(), "str".to_string()));
+                        return Ok((
+                            format!("lingo_int_parse({})", arg_code),
+                            CType::Result(Box::new(CType::I64), Box::new(CType::Str)),
+                        ));
+                    }
+                    CType::I64 => return Ok((arg_code, CType::I64)),
+                    CType::F64 => return Ok((format!("(int64_t)({})", arg_code), CType::I64)),
+                    CType::Bool => return Ok((format!("(({}) ? 1 : 0)", arg_code), CType::I64)),
+                    other => return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `int(x)` not supported for argument type `{}`", other.c_decl()),
+                        span,
+                    )),
+                }
+            }
+        }
         // Three call shapes we recognize:
         //   1. `foo(args)`            — free function
         //   2. `Type.method(args)`    — static method on a struct  -> `Type_method(args)`
@@ -3235,6 +3324,91 @@ static const char* lingo_f64_str(double x) {
     return buf;
 }
 
+/* v0.2.0: write s into out using Rust Debug for str representation:
+ * wrap in double quotes, escape backslash, double-quote, newline, tab,
+ * carriage-return, NUL, and other ASCII control chars as backslash-x-hex.
+ * Non-ASCII bytes (>=0x80) pass through unchanged so utf-8 stays intact.
+ * Caller is responsible for sizing out to at least 4*strlen(s)+3 bytes.
+ */
+__attribute__((unused))
+static void lingo_str_debug_escape(const char* s, char* out, size_t cap) {
+    size_t o = 0;
+    if (o < cap) out[o++] = '\"';
+    if (s != NULL) {
+        for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+            unsigned char c = *p;
+            if (c == '\\\\') { if (o+2<cap) { out[o++]='\\\\'; out[o++]='\\\\'; } }
+            else if (c == '\"') { if (o+2<cap) { out[o++]='\\\\'; out[o++]='\"'; } }
+            else if (c == '\\n') { if (o+2<cap) { out[o++]='\\\\'; out[o++]='n'; } }
+            else if (c == '\\t') { if (o+2<cap) { out[o++]='\\\\'; out[o++]='t'; } }
+            else if (c == '\\r') { if (o+2<cap) { out[o++]='\\\\'; out[o++]='r'; } }
+            else if (c == 0)    { if (o+2<cap) { out[o++]='\\\\'; out[o++]='0'; } }
+            else if (c < 0x20 || c == 0x7f) {
+                if (o+4<cap) {
+                    out[o++]='\\\\'; out[o++]='x';
+                    static const char* hex = \"0123456789abcdef\";
+                    out[o++]=hex[(c>>4)&0xf]; out[o++]=hex[c&0xf];
+                }
+            } else {
+                if (o+1<cap) out[o++]=(char)c;
+            }
+        }
+    }
+    if (o < cap) out[o++] = '\"';
+    if (o < cap) out[o] = 0; else out[cap-1] = 0;
+}
+
+/* v0.2.0: parse a base-10 int64 from a string.  Mirrors the interpreter
+ * builtin int(s) -> int!str exactly: leading/trailing ASCII whitespace is
+ * trimmed (same as Rust str::trim for ASCII), an optional sign is accepted,
+ * and the parse must consume every remaining character.  On failure we
+ * emit `int: can't parse \"<rust-debug-repr-of-original>\"` to match
+ * format!(\"int: can't parse {:?}\", s) in the interpreter.  Error strings
+ * are heap-allocated and leak on purpose (same policy as lingo_fmt_alloc).
+ */
+__attribute__((unused))
+static lingo_result_i64_str_t lingo_int_parse(const char* s) {
+    lingo_result_i64_str_t r;
+    r.is_err = false; r.ok = 0; r.err = NULL;
+    const char* orig = (s != NULL) ? s : \"\";
+
+    const char* a = orig;
+    while (*a == ' ' || *a == '\\t' || *a == '\\n' || *a == '\\r') a++;
+    const char* b = a + strlen(a);
+    while (b > a && (b[-1]==' ' || b[-1]=='\\t' || b[-1]=='\\n' || b[-1]=='\\r')) b--;
+
+    bool fail = false;
+    long long v = 0;
+    if (a == b) {
+        fail = true;
+    } else {
+        size_t n = (size_t)(b - a);
+        char* trimmed = (char*)malloc(n + 1);
+        if (!trimmed) { fprintf(stderr, \"lingo: oom in lingo_int_parse\\n\"); exit(1); }
+        memcpy(trimmed, a, n);
+        trimmed[n] = 0;
+        char* end = NULL;
+        errno = 0;
+        v = strtoll(trimmed, &end, 10);
+        if (end != trimmed + n || errno == ERANGE) fail = true;
+        free(trimmed);
+    }
+
+    if (fail) {
+        size_t cap = strlen(orig) * 4 + 32;
+        char* repr = (char*)malloc(cap);
+        if (!repr) { fprintf(stderr, \"lingo: oom in lingo_int_parse\\n\"); exit(1); }
+        lingo_str_debug_escape(orig, repr, cap);
+        size_t mcap = strlen(repr) + 32;
+        char* msg = (char*)malloc(mcap);
+        if (!msg) { fprintf(stderr, \"lingo: oom in lingo_int_parse\\n\"); exit(1); }
+        snprintf(msg, mcap, \"int: can't parse %s\", repr);
+        free(repr);
+        r.is_err = true; r.err = msg; return r;
+    }
+    r.ok = (int64_t)v; return r;
+}
+
 /* Two-pass snprintf into a fresh heap buffer.  Returned `const char*` leaks
  * on purpose (see note above).  Used by the f-string lowering. */
 __attribute__((unused))
@@ -3359,7 +3533,10 @@ static void lingo_vec_str_set(lingo_vec_str_t* v, int64_t i, const char* x) {
     // Marker is the chunk at the *end* of the prelude block, right after which
     // the helper splice goes — and crucially, the splice goes *after* the
     // `lingo_vec_<T>_t` typedefs (because the helpers reference them).
-    let marker = "typedef struct { int64_t* data; int64_t len; int64_t cap; } lingo_vec_i64_t;\ntypedef struct { double*  data; int64_t len; int64_t cap; } lingo_vec_f64_t;\ntypedef struct { const char** data; int64_t len; int64_t cap; } lingo_vec_str_t;\ntypedef struct { const char** keys; int64_t* vals; int64_t len; int64_t cap; } lingo_map_str_i64_t;\n\n";
+    // v0.2.0: splice the runtime helpers between the typedef section and
+    // the user prototypes — that way helpers can reference monomorphized
+    // result typedefs (e.g. `lingo_result_i64_str_t`) emitted by pass 2.5.
+    let marker = "/* === lingo runtime helpers === */\n";
     Ok(match core.find(marker) {
         Some(idx) => {
             let split = idx + marker.len();

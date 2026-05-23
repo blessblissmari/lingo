@@ -1,0 +1,35 @@
+# v0.2.0: `int(s)` parses a base-10 string into an `int ! str`.
+# Same shape in both the interpreter and the C backend:
+#   ok(n)  on success, err(msg) on failure.
+
+fn parse_pair(a: str, b: str) -> int ! str:
+    let x = int(a)?
+    let y = int(b)?
+    return x + y
+
+fn main():
+    # direct match on int(s)
+    match int("42"):
+        ok(n):  print(f"ok: {n}")
+        err(e): print(f"err: {e}")
+
+    match int("hello"):
+        ok(n):  print(f"ok: {n}")
+        err(e): print(f"err: {e}")
+
+    match int("   -7  "):
+        ok(n):  print(f"ok: {n}")
+        err(e): print(f"err: {e}")
+
+    match int(""):
+        ok(n):  print(f"ok: {n}")
+        err(e): print(f"err: {e}")
+
+    # `?` propagation across `! str`
+    match parse_pair("3", "4"):
+        ok(n):  print(f"sum: {n}")
+        err(e): print(f"err: {e}")
+
+    match parse_pair("3", "oops"):
+        ok(n):  print(f"sum: {n}")
+        err(e): print(f"err: {e}")

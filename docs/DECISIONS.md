@@ -177,6 +177,14 @@ no `while`, no `loop`, no `do…while`. infinite loops are `for _ in forever:`.
 both the interpreter and the C backend produce byte-identical output;
 adding a backend without parity is a compile-error-grade regression.
 
+extended in v0.2.0: error strings from `T ! str` builtins also obey
+the parity rule. `int(s) -> int!str` renders failures as
+`int: can't parse "<rust-debug-repr>"`, where the repr is exactly
+`format!("{:?}", s)` — the C backend's `lingo_str_debug_escape`
+runtime helper mirrors rust's `Debug for &str` byte-for-byte
+(`"..."` wrapping, `\"`/`\\`/`\n`/`\t`/`\r`/NUL escapes, `\xNN` for
+other ASCII control chars, non-ASCII bytes pass through).
+
 ### one string interpolation form
 
 ```lingo
