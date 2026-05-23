@@ -17,15 +17,21 @@
 - [x] **tree-walking interpreter** (no codegen yet) — `compiler/src/interp.rs`
 - [x] **cli** — `lingo path/to/file.lingo`, `--tokens`, `--ast`
 - [x] hello world + fib + math examples passing as integration tests
+- [x] **structs** with field access and `impl Type:` methods (incl. static)
+- [x] **enums** with variant payloads, `Type.Variant(...)` construction
+- [x] **match** with wildcard, literal, bind, and `Type.Variant(...)` patterns
+- [x] **vec[T]** literal `vec[a, b, c]` + `.len/.push/.pop/.get/.set/.contains/.clear/.reverse`
+- [x] **string methods** `.len/.contains/.starts_with/.ends_with/.to_lower/.to_upper/.trim/.split/.replace`
+- [x] **for** over range / vec / str
 - [ ] desugaring pass:
   - `?` → match
-  - `f"..."` → `string.concat([...])` calls
-  - `for x in iter:` → iterator protocol (currently `for x in a..b` only)
+  - `f"..."` → string concat
 - [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
-- [ ] structs / enums / traits / impl
+- [ ] traits (`trait` + `impl Trait for Type`)
 - [ ] error types (`! E`) and `?` propagation
-- [ ] generics (monomorphized)
+- [ ] `map[K, V]` literals + methods
+- [ ] generics (monomorphized — interpreter currently ignores type args)
 - [ ] explicit allocators + `defer`
 - [ ] 500-program test suite, mostly hand-written, partly llm-generated
 
