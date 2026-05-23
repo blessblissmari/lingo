@@ -1,0 +1,8 @@
+# A sibling module loaded by main.lingo via `import math`.
+const PI = 3
+
+fn add(a: int, b: int) -> int:
+    return a + b
+
+fn square(x: int) -> int:
+    return x * x

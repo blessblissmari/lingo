@@ -1,0 +1,7 @@
+# A module is free to declare its own enums and structs and use them
+# in its own functions. Cross-module type refs are deferred to v0.3.x.
+import shapes
+
+fn main():
+    print(f"area_sq(4) = {shapes.area_sq(4)}")
+    print(f"area_rect(3, 5) = {shapes.area_rect(3, 5)}")

@@ -744,6 +744,17 @@ impl Codegen {
         // block itself (see the `runtime_helpers` substitution in `emit`).
 
         // Pass 3: emit prototypes and bodies.
+        //
+        // We open a *module-level* scope here so that top-level consts have
+        // somewhere to live before any function body runs.  Without this
+        // frame, `self.scopes.last_mut()` below was a silent no-op (the
+        // single-file v0.2.x examples didn't happen to exercise top-level
+        // consts in the C backend, so this gap stayed latent until v0.3.0
+        // brought in `math.PI`-style cross-module const access).  Function
+        // bodies push their own inner scope on top of this one and pop it
+        // back; `lookup_var` walks the whole stack so consts remain
+        // reachable from any function body.
+        self.scopes.push(HashMap::new());
         for item in items {
             match item {
                 Item::Fn(f) => {
@@ -762,8 +773,11 @@ impl Codegen {
                 Item::Const(c) => {
                     let (code, ty) = self.gen_expr(&c.value)?;
                     writeln!(self.protos, "static {} {} = {};", ty.c_decl(), c.name, code).unwrap();
-                    // top-level const becomes visible to scoped lookups
-                    self.scopes.last_mut().map(|s| s.insert(c.name.clone(), ty));
+                    // top-level const becomes visible to scoped lookups via
+                    // the module-level frame we pushed above.
+                    if let Some(s) = self.scopes.last_mut() {
+                        s.insert(c.name.clone(), ty);
+                    }
                     // v0.1.27: also record under `consts` so `check_no_shadow`
                     // finds it even when no module-scope frame exists yet.
                     self.consts.insert(c.name.clone());
@@ -773,6 +787,7 @@ impl Codegen {
                 _ => unreachable!(),
             }
         }
+        self.scopes.pop();
 
         // Compose final source.
         let mut out = String::new();
@@ -1133,6 +1148,18 @@ impl Codegen {
     /// Underscore `_` is the "don't bind" name and is always allowed.
     fn check_no_shadow(&self, name: &str, span: Span) -> Result<(), LingoError> {
         if name == "_" { return Ok(()); }
+        // Check module-level consts first so we keep the more specific
+        // "already declared at module scope" diagnostic the interpreter
+        // also emits.  Without this, the v0.3.0 module-scope frame
+        // (pushed at the start of codegen pass 3) would catch the const
+        // first via the generic "already in scope" path.
+        if self.consts.contains(name) {
+            return Err(LingoError::new(
+                Stage::Resolve,
+                format!("`{}` already declared at module scope", name),
+                span,
+            ));
+        }
         for scope in self.scopes.iter().rev() {
             if scope.contains_key(name) {
                 return Err(LingoError::new(

@@ -296,6 +296,11 @@ impl Interp {
                     self.traits.insert(t.name.clone(), t.clone());
                 }
                 Item::Impl(_) | Item::Const(_) | Item::ImplTrait(_) => {}
+                // v0.3.0 — the resolver flattens away every `import` before
+                // the program reaches us; if one shows up here, that's a bug.
+                Item::Import(_) => unreachable!(
+                    "Item::Import must be stripped by the module resolver"
+                ),
             }
         }
         // v0.2.5: if any `impl From[..] for ..:` block is present but the

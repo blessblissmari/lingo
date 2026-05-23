@@ -75,7 +75,7 @@ fn main() -> ExitCode {
     };
 
     match mode {
-        Mode::EmitC => match lingoc::emit_c(&source, &path) {
+        Mode::EmitC => match lingoc::emit_c_path(&path) {
             Ok(c) => {
                 print!("{c}");
                 ExitCode::SUCCESS
@@ -86,7 +86,7 @@ fn main() -> ExitCode {
             }
         },
         Mode::Build => {
-            let c = match lingoc::emit_c(&source, &path) {
+            let c = match lingoc::emit_c_path(&path) {
                 Ok(c) => c,
                 Err(msg) => {
                     eprintln!("{msg}");
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Mode::Run => match lingoc::run_with_argv(&source, &path, prog_args) {
+        Mode::Run => match lingoc::run_path(&path, prog_args) {
             Ok(_) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("{msg}");

@@ -1,0 +1,6 @@
+# `import foo.bar` reads from foo/bar.lingo relative to the entry file.
+import foo.bar
+
+fn main():
+    print(f"bar.greet() = {bar.greet()}")
+    print(f"bar.SHOUT = {bar.SHOUT}")

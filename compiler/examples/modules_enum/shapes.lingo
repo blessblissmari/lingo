@@ -1,0 +1,14 @@
+struct Square:
+    side: int
+
+struct Rect:
+    w: int
+    h: int
+
+fn area_sq(side: int) -> int:
+    let s = Square{side: side}
+    return s.side * s.side
+
+fn area_rect(w: int, h: int) -> int:
+    let r = Rect{w: w, h: h}
+    return r.w * r.h

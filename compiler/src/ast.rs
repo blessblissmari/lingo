@@ -30,6 +30,25 @@ pub enum Item {
     Impl(ImplBlock),
     Trait(TraitDecl),
     ImplTrait(ImplTraitBlock),
+    /// v0.3.0 — `import foo.bar` / `import foo.bar as b`.
+    /// Resolved by `src/modules.rs` before the program reaches the
+    /// interpreter or the C backend; by then every import has been
+    /// flattened away and every cross-module reference has been
+    /// rewritten to a globally-unique mangled name.  An `Item::Import`
+    /// only ever survives between *parser → resolver*; it should never
+    /// reach `interp.rs` or `codegen_c.rs`.
+    Import(ImportDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    /// Dotted path as written, e.g. `import foo.bar` → `["foo", "bar"]`.
+    /// Resolved to `<entry_dir>/foo/bar.lingo`.
+    pub path: Vec<String>,
+    /// Optional `as <name>` alias.  If absent, the last segment of `path`
+    /// is the alias (so `import foo.bar` is `bar.<name>`).
+    pub alias: Option<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

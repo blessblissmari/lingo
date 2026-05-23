@@ -86,15 +86,58 @@ impl Parser {
             Tok::Enum => Ok(Item::Enum(self.enum_decl()?)),
             Tok::Impl => self.impl_or_impl_trait(),
             Tok::Trait => Ok(Item::Trait(self.trait_decl()?)),
+            Tok::Import => Ok(Item::Import(self.import_decl()?)),
             other => Err(LingoError::new(
                 Stage::Parse,
                 format!(
-                    "expected `fn`, `const`, `struct`, `enum`, `impl`, or `trait` at top level, got {:?}",
+                    "expected `fn`, `const`, `struct`, `enum`, `impl`, `trait`, or `import` at top level, got {:?}",
                     other
                 ),
                 self.peek().span,
             )),
         }
+    }
+
+    /// v0.3.0 — `import foo.bar [as alias]` newline.
+    /// Parses the dotted path as one or more `Ident`s separated by `.`,
+    /// optionally followed by `as <ident>`.
+    fn import_decl(&mut self) -> Result<ImportDecl, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Import, "`import`")?;
+        let mut path = Vec::new();
+        let first = self.expect(Tok::Ident("".into()), "module name after `import`")?;
+        let name = match first.tok {
+            Tok::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        path.push(name);
+        let mut end = first.span.end;
+        while self.eat(Tok::Dot) {
+            let seg = self.expect(Tok::Ident("".into()), "module name segment after `.`")?;
+            let n = match seg.tok {
+                Tok::Ident(s) => s,
+                _ => unreachable!(),
+            };
+            end = seg.span.end;
+            path.push(n);
+        }
+        let alias = if self.eat(Tok::As) {
+            let a = self.expect(Tok::Ident("".into()), "alias name after `as`")?;
+            let n = match a.tok {
+                Tok::Ident(s) => s,
+                _ => unreachable!(),
+            };
+            end = a.span.end;
+            Some(n)
+        } else {
+            None
+        };
+        self.expect(Tok::Newline, "newline after `import` declaration")?;
+        Ok(ImportDecl {
+            path,
+            alias,
+            span: Span::new(start, end),
+        })
     }
 
     fn struct_decl(&mut self) -> Result<StructDecl, LingoError> {

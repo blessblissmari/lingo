@@ -1,0 +1,9 @@
+# v0.3.0 - multi-file modules. The entry file imports `math` and
+# calls one of its functions through the alias.
+import math
+
+fn main():
+    let x = math.add(2, 3)
+    print(f"2 + 3 = {x}")
+    print(f"square(7) = {math.square(7)}")
+    print(f"PI ~ {math.PI}")

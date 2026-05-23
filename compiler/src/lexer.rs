@@ -58,6 +58,7 @@ pub enum Tok {
     Self_,
     Raise,
     Print, // builtin name, treated like an identifier but reserved
+    Import, // v0.3.0 — `import foo.bar [as alias]`
 
     // punctuation / operators
     LParen,
@@ -458,6 +459,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LingoError> {
                 "self" => Tok::Self_,
                 "raise" => Tok::Raise,
                 "print" => Tok::Print,
+                "import" => Tok::Import,
                 other => Tok::Ident(other.to_string()),
             };
             tokens.push(Token::new(tok, Span::new(i, end)));

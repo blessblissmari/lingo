@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# v0.1.29 consolidation audit: prove every example runs and (where applicable)
+# v0.3.0 consolidation audit: prove every example runs and (where applicable)
 # native output == interp output.
+#
+# Examples now come in two shapes:
+#   1. `examples/foo.lingo`           — single-file program
+#   2. `examples/{name}/main.lingo`   — multi-file module program (v0.3.0+)
+#
+# Both shapes are picked up automatically; the stem reported in the table is
+# `foo` for case 1 and `{name}` for case 2.
 #
 # Output: a Markdown summary printed to stdout.
 
@@ -42,15 +49,35 @@ declare -A ARGS
 ARGS[parse_port]="8080"
 ARGS[greet]="World"
 
-echo "## v0.1.29 audit"
+echo "## v0.3.0 audit"
 echo
 echo "| example | interp | native | output match | notes |"
 echo "| --- | --- | --- | --- | --- |"
 
+# Build the full list of entry files: single-file `examples/foo.lingo`
+# plus multi-file `examples/{name}/main.lingo`.  Sort for a deterministic
+# table order across runs.
+ENTRIES=()
+for f in examples/*.lingo; do
+    [ -e "$f" ] || continue
+    ENTRIES+=("$f")
+done
+for d in examples/*/; do
+    main="${d}main.lingo"
+    [ -f "$main" ] && ENTRIES+=("$main")
+done
+IFS=$'\n' ENTRIES=($(sort <<<"${ENTRIES[*]}")); unset IFS
+
 TOTAL=0; PASS=0; FAIL=0
 TMP=$(mktemp -d)
-for f in examples/*.lingo; do
-    stem=$(basename "$f" .lingo)
+for f in "${ENTRIES[@]}"; do
+    # Stem: single-file uses the filename; multi-file uses its directory
+    # name so the table reads `modules_basic` instead of `main`.
+    if [[ "$f" == */*/main.lingo ]]; then
+        stem=$(basename "$(dirname "$f")")
+    else
+        stem=$(basename "$f" .lingo)
+    fi
     TOTAL=$((TOTAL+1))
     args=${ARGS[$stem]:-}
 
@@ -80,23 +107,35 @@ for f in examples/*.lingo; do
         i_rc=$?
     fi
 
-    # native
-    cd "$TMP"
-    LINGO_OUT="$TMP/$stem" "$OLDPWD/$LINGO" build "$OLDPWD/$f" >"$TMP/n.build.out" 2>"$TMP/n.build.err"
+    # native — build inside its own subdir of $TMP so multi-file
+    # programs (which all build to `./main`) don't clobber each
+    # other's binaries.
+    bin_dir="$TMP/$stem"
+    mkdir -p "$bin_dir"
+    cd "$bin_dir"
+    "$OLDPWD/$LINGO" build "$OLDPWD/$f" >"$TMP/n.build.out" 2>"$TMP/n.build.err"
     n_build_rc=$?
     cd - >/dev/null
 
-    if [ $n_build_rc -ne 0 ] || [ ! -x "$TMP/$stem" ]; then
+    # The compiler names the binary after the entry file's stem.
+    if [[ "$f" == */*/main.lingo ]]; then
+        bin_name="main"
+    else
+        bin_name="$stem"
+    fi
+    bin_path="$bin_dir/$bin_name"
+
+    if [ $n_build_rc -ne 0 ] || [ ! -x "$bin_path" ]; then
         echo "| $stem | $([ $i_rc -eq 0 ] && echo ok || echo "exit $i_rc") | **build fail** | n/a | $(head -1 "$TMP/n.build.err") |"
         FAIL=$((FAIL+1))
         continue
     fi
 
     if [ -n "$args" ]; then
-        n_out=$(timeout 10 "$TMP/$stem" $args 2>"$TMP/n.err")
+        n_out=$(timeout 10 "$bin_path" $args 2>"$TMP/n.err")
         n_rc=$?
     else
-        n_out=$(timeout 10 "$TMP/$stem" 2>"$TMP/n.err")
+        n_out=$(timeout 10 "$bin_path" 2>"$TMP/n.err")
         n_rc=$?
     fi
 
