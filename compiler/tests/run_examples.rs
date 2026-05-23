@@ -228,6 +228,23 @@ print(double(7))
 }
 
 #[test]
+fn c_backend_vec_user_types_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("vec_user_types_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("vec_user_types_native.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
+fn c_backend_traits_lingo_native_matches_interp() {
+    // The full traits.lingo example (with `vec[Animal.Cat, ...]`) is now native too.
+    let Some((native_out, stderr, code)) = run_native("traits.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("traits.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
 fn c_backend_traits_native_matches_interp() {
     let Some((native_out, stderr, code)) = run_native("traits_native.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
