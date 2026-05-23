@@ -25,6 +25,10 @@ struct Parser {
 }
 
 impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
@@ -966,6 +970,35 @@ impl Parser {
                     span: tok.span,
                 })
             }
+            Tok::FString(parts) => {
+                self.advance();
+                let mut out: Vec<FStringPart> = Vec::with_capacity(parts.len());
+                for part in parts {
+                    match part {
+                        crate::lexer::FPart::Lit(s) => out.push(FStringPart::Lit(s)),
+                        crate::lexer::FPart::Expr(src) => {
+                            // sub-lex and sub-parse the embedded expression.
+                            let sub_toks = crate::lexer::lex(&src)?;
+                            let mut sub = Parser::new(sub_toks);
+                            let e = sub.expr()?;
+                            // ensure the whole sub-source was a single expression
+                            sub.skip_newlines();
+                            if !matches!(sub.peek_tok(), Tok::Eof) {
+                                return Err(LingoError::new(
+                                    Stage::Parse,
+                                    "expected a single expression inside `{...}`",
+                                    tok.span,
+                                ));
+                            }
+                            out.push(FStringPart::Expr(e));
+                        }
+                    }
+                }
+                Ok(Expr {
+                    kind: ExprKind::FString(out),
+                    span: tok.span,
+                })
+            }
             Tok::True => {
                 self.advance();
                 Ok(Expr {
@@ -1004,6 +1037,27 @@ impl Parser {
                     let close = self.expect(Tok::RBracket, "`]` to close vec literal")?;
                     return Ok(Expr {
                         kind: ExprKind::VecLit(items),
+                        span: Span::new(tok.span.start, close.span.end),
+                    });
+                }
+                // map literal: `map{key: val, key: val}`
+                if s == "map" && self.at(Tok::LBrace) {
+                    self.advance(); // consume `{`
+                    let mut entries: Vec<(Expr, Expr)> = Vec::new();
+                    if !self.at(Tok::RBrace) {
+                        loop {
+                            let k = self.expr()?;
+                            self.expect(Tok::Colon, "`:` between map key and value")?;
+                            let v = self.expr()?;
+                            entries.push((k, v));
+                            if !self.eat(Tok::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(Tok::RBrace, "`}` to close map literal")?;
+                    return Ok(Expr {
+                        kind: ExprKind::MapLit(entries),
                         span: Span::new(tok.span.start, close.span.end),
                     });
                 }
