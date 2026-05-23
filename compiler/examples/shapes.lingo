@@ -1,0 +1,30 @@
+# enums + match. variants can hold positional data.
+# `match` arms are checked top-to-bottom; an unmatched value is a runtime error.
+
+enum Shape:
+    Circle(f64)
+    Rect(f64, f64)
+    Triangle(f64, f64, f64)
+
+fn area(s: Shape) -> f64:
+    match s:
+        Shape.Circle(r):
+            return 3.14159 * r * r
+        Shape.Rect(w, h):
+            return w * h
+        Shape.Triangle(a, b, c):
+            # heron's formula
+            let p = (a + b + c) / 2.0
+            return (p * (p - a) * (p - b) * (p - c)) ** 0.5
+
+fn name(s: Shape) -> str:
+    match s:
+        Shape.Circle(_):    return "circle"
+        Shape.Rect(_, _):   return "rect"
+        Shape.Triangle(_, _, _): return "triangle"
+
+fn main():
+    let shapes = Shape.Circle(2.0)
+    print(name(shapes), "area:", area(shapes))
+    print(name(Shape.Rect(3.0, 4.0)), "area:", area(Shape.Rect(3.0, 4.0)))
+    print(name(Shape.Triangle(3.0, 4.0, 5.0)), "area:", area(Shape.Triangle(3.0, 4.0, 5.0)))
