@@ -1,0 +1,71 @@
+# a guided tour of lingo v0.1.5.
+# everything you see here works in the bootstrap interpreter today.
+
+# ── 1. data ────────────────────────────────────────────────────
+struct Point:
+    x: int
+    y: int
+
+impl Point:
+    fn dist_sq(self) -> int:
+        return self.x ** 2 + self.y ** 2
+
+enum Shape:
+    Circle(int)              # radius
+    Square(int)              # side
+    Rect(int, int)           # w, h
+
+
+# ── 2. fns, kw-args (required when fn has more than 2 params) ──
+fn area(s: Shape) -> int:
+    match s:
+        Shape.Circle(r):  return 3 * r * r
+        Shape.Square(a):  return a * a
+        Shape.Rect(w, h): return w * h
+
+fn greet(name: str, hour: int, mood: str) -> str:
+    if hour < 12:
+        return f"good morning, {name} — feeling {mood}?"
+    return f"good evening, {name}"
+
+
+# ── 3. error types: `! E`, `raise`, `?`, match ok/err ─────────
+enum ParseErr:
+    Empty
+    NotANumber
+
+fn safe_int(s: str) -> int ! ParseErr:
+    if s.len() == 0:
+        raise ParseErr.Empty
+    let r = int(s)?            # `?` lifts the `str` error from `int()` to caller
+    return r
+
+
+# ── 4. main ───────────────────────────────────────────────────
+fn main():
+    # f-strings, struct method, vec, map
+    let p = Point{x: 3, y: 4}
+    print(f"|p|^2 = {p.dist_sq()}")
+
+    let shapes = vec[Shape.Circle(2), Shape.Square(3), Shape.Rect(4, 5)]
+    let mut total = 0
+    for s in shapes:
+        total = total + area(s)
+    print(f"total area = {total}")
+
+    print(greet(name: "артём", hour: 11, mood: "dangerous"))
+
+    # map: word frequency
+    let mut counts = map{}
+    for w in "the fox the lazy dog the fox".split(" "):
+        match counts.get(w):
+            none: counts.set(w, 1)
+            _:    counts.set(w, counts.get(w) + 1)
+    print(f"unique words: {counts.len()}")
+
+    # error handling
+    match safe_int("42"):
+        ok(n):                     print(f"parsed: {n}")
+        err(ParseErr.Empty):       print("empty")
+        err(ParseErr.NotANumber):  print("not a number")
+        _:                         print("other parse failure")
