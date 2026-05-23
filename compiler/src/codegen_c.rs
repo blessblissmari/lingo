@@ -1691,11 +1691,95 @@ impl Codegen {
                                     fmt.push_str(ty.printf_fmt());
                                     vals.push(code);
                                 }
+                                CType::Enum(name) => {
+                                    // v0.1.22: enum interp renders as
+                                    // `Name.Variant(...)`.  We materialise the
+                                    // value into a temp, switch on its tag,
+                                    // and assign a freshly-formatted `const
+                                    // char*` per variant.
+                                    let decl = self.enums.get(name).cloned().ok_or_else(|| {
+                                        LingoError::new(Stage::Resolve,
+                                            format!("C backend: enum `{}` not registered", name),
+                                            ex.span)
+                                    })?;
+                                    let tmp = format!("__fse_{}", self.tmp_counter);
+                                    self.tmp_counter += 1;
+                                    let out = format!("__fseo_{}", self.tmp_counter);
+                                    self.tmp_counter += 1;
+                                    writeln!(self.body, "{}{} {} = {};", self.pad(), name, tmp, code).unwrap();
+                                    writeln!(self.body, "{}const char* {};", self.pad(), out).unwrap();
+                                    writeln!(self.body, "{}switch ({}.tag) {{", self.pad(), tmp).unwrap();
+                                    for v in &decl.variants {
+                                        writeln!(self.body, "{}    case {}_{}_TAG: {{",
+                                                 self.pad(), name, v.name).unwrap();
+                                        let mut inner_fmt = format!("{}.{}", name, v.name);
+                                        let mut inner_vals: Vec<String> = Vec::new();
+                                        if !v.payload.is_empty() {
+                                            inner_fmt.push('(');
+                                            for (pi, p) in v.payload.iter().enumerate() {
+                                                if pi > 0 { inner_fmt.push_str(", "); }
+                                                let pty = map_type_with(p, v.span, Some(&self.structs), Some(&self.enums))?;
+                                                inner_fmt.push_str(&debug_fmt_for(&pty));
+                                                inner_vals.push(debug_val_for(&pty, &format!("{}.as.{}._{}", tmp, v.name, pi)));
+                                            }
+                                            inner_fmt.push(')');
+                                        }
+                                        let inner_args = if inner_vals.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(", {}", inner_vals.join(", "))
+                                        };
+                                        writeln!(self.body, "{}        {} = lingo_fmt_alloc(\"{}\"{});",
+                                                 self.pad(), out, inner_fmt, inner_args).unwrap();
+                                        writeln!(self.body, "{}        break;", self.pad()).unwrap();
+                                        writeln!(self.body, "{}    }}", self.pad()).unwrap();
+                                    }
+                                    writeln!(self.body, "{}    default: {} = \"<unknown>\";", self.pad(), out).unwrap();
+                                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                                    fmt.push_str("%s");
+                                    vals.push(out);
+                                }
+                                CType::Struct(name) => {
+                                    // v0.1.22: interpolating a struct renders
+                                    // its debug form (`Name{f1: v1, f2: v2}`)
+                                    // — same shape `print` uses.  We pre-build
+                                    // the rendered string via `lingo_fmt_alloc`
+                                    // and splice it as a `%s` placeholder.
+                                    let fields = self.structs.get(name).cloned().ok_or_else(|| {
+                                        LingoError::new(Stage::Resolve,
+                                            format!("C backend: struct `{}` not registered", name),
+                                            ex.span)
+                                    })?;
+                                    // Bind to a temp so we evaluate once.
+                                    let tmp = format!("__fsp_{}", self.tmp_counter);
+                                    self.tmp_counter += 1;
+                                    writeln!(self.body, "{}{} {} = {};",
+                                             self.pad(), name, tmp, code).unwrap();
+                                    let mut inner_fmt = String::new();
+                                    let mut inner_vals: Vec<String> = Vec::new();
+                                    inner_fmt.push_str(name);
+                                    inner_fmt.push('{');
+                                    for (fi, (fname, fty)) in fields.iter().enumerate() {
+                                        if fi > 0 { inner_fmt.push_str(", "); }
+                                        inner_fmt.push_str(fname);
+                                        inner_fmt.push_str(": ");
+                                        inner_fmt.push_str(&debug_fmt_for(fty));
+                                        inner_vals.push(debug_val_for(fty, &format!("{}.{}", tmp, fname)));
+                                    }
+                                    inner_fmt.push('}');
+                                    let inner_args = if inner_vals.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(", {}", inner_vals.join(", "))
+                                    };
+                                    fmt.push_str("%s");
+                                    vals.push(format!("lingo_fmt_alloc(\"{}\"{})", inner_fmt, inner_args));
+                                }
                                 other => {
                                     return Err(LingoError::new(
                                         Stage::Resolve,
                                         format!("C backend: f-string can't interpolate `{}` yet \
-                                                 (only primitives in v0.1.13)",
+                                                 (have: primitives + structs as of v0.1.22)",
                                                 other.c_decl()),
                                         ex.span,
                                     ));
