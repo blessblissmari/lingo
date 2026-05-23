@@ -7,7 +7,8 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1 — design + a working lexer/parser/interpreter.
+> ⚠️ **status:** v0.1.5 — bootstrap interpreter is *usable*. 10/10 integration tests green.
+> structs / enums / match / vec / map / f-strings / utf-8 / `T ! E` error types / `?` / io builtins all work.
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
 
@@ -25,7 +26,10 @@ cargo run --release -- ../examples/fib.lingo
 # 0 1 1 2 3 5 8 13 21 34   (one per line)
 
 cargo test
-# 5 passed; 0 failed
+# 10 passed; 0 failed
+
+# guided tour of every v0.1.5 feature:
+cargo run --release -- examples/tour.lingo
 ```
 
 requires rust 1.75+ (`rustup` will get you there).
