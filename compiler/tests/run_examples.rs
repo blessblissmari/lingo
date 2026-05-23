@@ -194,6 +194,39 @@ fn c_backend_hello_native() {
     assert_eq!(stdout, "hello, lingo\n");
 }
 
+/// REPL end-to-end smoke test: pipe a small session and check the prompt
+/// barfs the right values back.  We deliberately use a heredoc-style script
+/// so the test is portable and survives parser changes.
+#[test]
+fn repl_basic_session() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let mut child = Command::new(bin)
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn repl");
+
+    let session = "\
+let x = 21
+print(x + x)
+fn double(n: i64) -> i64:
+    return n * 2
+
+print(double(7))
+:quit
+";
+    child.stdin.as_mut().unwrap().write_all(session.as_bytes()).unwrap();
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("42"), "REPL output missing `42`:\n{stdout}");
+    assert!(stdout.contains("14"), "REPL output missing `14`:\n{stdout}");
+}
+
 #[test]
 fn c_backend_wordcount_native_matches_interp() {
     let Some((native_out, stderr, code)) = run_native("wordcount_native.lingo") else { return };
