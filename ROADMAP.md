@@ -34,6 +34,7 @@
 - [x] **C backend enums + match** (v0.1.9): each `enum T` becomes `T_Tag` + `struct T { tag; union { ... } as; }`; variant constructors lower to designated initializers; `match` becomes `switch (x.tag)` with payload subpatterns binding to `x.as.Variant._0/_1/...`.
 - [x] **C backend f64 floats** (v0.1.10): `f64` lowers to `double`; float literals always emit a decimal point; arithmetic upcasts when either side is f64; `x ** y` on f64 lowers to `pow(x, y)` (libm linked with `-lm`); `%` on floats is a compile-time error.
 - [x] **C backend debug print + keyword args** (v0.1.11): `print(value)` auto-generates a `Type{field: value, ...}` format for structs and a `Type.Variant(payload, ...)` format for enums (matches Rust's `{:?}` intent). Keyword args resolved positionally in calls (`f(name: 1, value: 2)`), with duplicate/unknown/missing-arg checks.
+- [x] **C backend vec[i64] (read-only)** (v0.1.12): `vec[1, 2, 3]` literal lowers to a C99 compound literal backing a `lingo_vec_i64_t { const int64_t* data; int64_t len; }`. Supported ops: `v.len()`, `v.get(i)`, and `for x in v` iteration. Type annotations `vec[i64]` work in fn params. Mutation (`push`/`pop`/`set`) and other element types wait until the allocator story lands. Bench: vec iteration ~3000× faster than interpreter (5ms vs 15s for 10M ops).
 - [ ] auto-wrap `?` via a `From<E>` trait (needs generic trait params first)
 - [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
