@@ -1,0 +1,20 @@
+# auto-generated debug printing for structs and enums in the C backend.
+# Same intent as Rust's `{:?}`: `print(point)` Just Works.
+
+struct User:
+    id: i64
+    name: str
+    active: bool
+
+enum Event:
+    Login
+    Logout
+    Message(str, i64)
+
+fn main():
+    let u = User{id: 1, name: "ada", active: true}
+    let e1 = Event.Login
+    let e2 = Event.Message("hi", 42)
+    print(u)
+    print("event:", e1)
+    print("event:", e2)
