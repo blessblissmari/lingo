@@ -1,0 +1,19 @@
+# f-strings: interpolate any expression with `{...}`. The value is
+# auto-formatted with its `display` form (the same one `print` uses).
+# Use `\{` and `\}` to embed literal braces.
+
+struct Point:
+    x: int
+    y: int
+
+fn main():
+    let name = "артём"   # utf-8 works in v0.1.4
+    let age = 27
+    print(f"hello, {name}! you are {age} years old.")
+    print(f"next year you'll be {age + 1}.")
+
+    let p = Point{x: 3, y: 4}
+    print(f"point = {p}, sum = {p.x + p.y}")
+
+    let answer = 42
+    print(f"the answer is \{{answer}\} = \{{answer}\}")
