@@ -61,6 +61,21 @@ origin: Point{x: 0.0, y: 0.0}
 }
 
 #[test]
+fn words() {
+    let (stdout, stderr, code) = run("words.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+trimmed: the quick brown fox jumps over the lazy dog
+upper: THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG
+count: 9
+long words: vec[quick, brown, jumps]
+contains 'quick'? true
+contains 'cat'? false
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
 fn shapes() {
     let (stdout, stderr, code) = run("shapes.lingo");
     assert_eq!(code, 0, "stderr: {stderr}");
