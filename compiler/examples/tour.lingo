@@ -37,7 +37,10 @@ enum ParseErr:
 fn safe_int(s: str) -> int ! ParseErr:
     if s.len() == 0:
         raise ParseErr.Empty
-    let r = int(s)?            # `?` lifts the `str` error from `int()` to caller
+    # `? else <expr>` lifts the inner `str` error from `int(s) -> int!str`
+    # into the caller's `int!ParseErr` type (v0.2.2).  Without `else`, `?`
+    # only propagates errors of the same type as the caller's `raises`.
+    let r = int(s)? else ParseErr.NotANumber
     return r
 
 
