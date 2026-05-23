@@ -41,6 +41,9 @@ enum CType {
     /// also the typedef'd C name (no mangling needed — lingo names are
     /// already valid C identifiers).
     Struct(String),
+    /// User-defined tagged-union (lingo `enum`). Same naming convention:
+    /// the C type is a typedef of the same lingo name.
+    Enum(String),
 }
 
 impl CType {
@@ -52,6 +55,7 @@ impl CType {
             CType::Str => "const char*".into(),
             CType::Void => "void".into(),
             CType::Struct(name) => name.clone(),
+            CType::Enum(name) => name.clone(),
         }
     }
 
@@ -66,6 +70,7 @@ impl CType {
             CType::Str => "%s",
             CType::Void => "",
             CType::Struct(_) => "<struct>", // not directly printable yet
+            CType::Enum(_) => "<enum>",     // not directly printable yet
         }
     }
 }
@@ -76,7 +81,8 @@ impl CType {
 fn map_type_with(
     t: &TypeRef,
     span: Span,
-    known_structs: Option<&HashMap<String, Vec<(String, CType)>>>,
+    structs: Option<&HashMap<String, Vec<(String, CType)>>>,
+    enums: Option<&HashMap<String, EnumDecl>>,
 ) -> Result<CType, LingoError> {
     if !t.type_args.is_empty() {
         return Err(LingoError::new(
@@ -91,9 +97,14 @@ fn map_type_with(
         "bool" => CType::Bool,
         "str" => CType::Str,
         other => {
-            if let Some(map) = known_structs {
+            if let Some(map) = structs {
                 if map.contains_key(other) {
                     return Ok(CType::Struct(other.to_string()));
+                }
+            }
+            if let Some(map) = enums {
+                if map.contains_key(other) {
+                    return Ok(CType::Enum(other.to_string()));
                 }
             }
             return Err(LingoError::new(
@@ -106,7 +117,7 @@ fn map_type_with(
 }
 
 fn map_type(t: &TypeRef, span: Span) -> Result<CType, LingoError> {
-    map_type_with(t, span, None)
+    map_type_with(t, span, None, None)
 }
 
 pub struct Codegen {
@@ -121,6 +132,8 @@ pub struct Codegen {
     fn_sigs: HashMap<String, (Vec<CType>, CType)>,
     /// `struct_name -> [(field_name, field_type)]`, in declared order.
     structs: HashMap<String, Vec<(String, CType)>>,
+    /// `enum_name -> EnumDecl`, kept around for variant lookup.
+    enums: HashMap<String, EnumDecl>,
     /// Stack of local-scope variable types. Top frame is the active scope.
     scopes: Vec<HashMap<String, CType>>,
     /// How deep are we indented in the current C function body?
@@ -135,6 +148,7 @@ impl Codegen {
             type_defs: String::new(),
             fn_sigs: HashMap::new(),
             structs: HashMap::new(),
+            enums: HashMap::new(),
             scopes: Vec::new(),
             indent: 0,
         }
@@ -145,22 +159,28 @@ impl Codegen {
         // Bail fast on anything the C backend can't handle.
         for item in &prog.items {
             match item {
-                Item::Fn(_) | Item::Const(_) | Item::Struct(_) | Item::Impl(_) => {}
+                Item::Fn(_) | Item::Const(_) | Item::Struct(_) | Item::Impl(_) | Item::Enum(_) => {}
                 _ => {
                     let span = match item {
-                        Item::Enum(e) => e.span,
                         Item::Trait(t) => t.span,
                         Item::ImplTrait(b) => b.span,
                         _ => Span::dummy(),
                     };
                     return Err(LingoError::new(
                         Stage::Resolve,
-                        "C backend: `enum`, `trait`, and `impl Trait for Type` need \
-                         v0.2 lowering (tagged unions + vtables). \
-                         Use the interpreter for now.",
+                        "C backend: `trait` and `impl Trait for Type` need \
+                         v0.2 vtable lowering. Use the interpreter for now.",
                         span,
                     ));
                 }
+            }
+        }
+
+        // Pass 0: register enums (names only) so struct fields / fn params /
+        // return types can reference them.
+        for item in &prog.items {
+            if let Item::Enum(e) = item {
+                self.enums.insert(e.name.clone(), e.clone());
             }
         }
 
@@ -182,7 +202,7 @@ impl Codegen {
             if let Item::Struct(s) = item {
                 let mut fields = Vec::with_capacity(s.fields.len());
                 for f in &s.fields {
-                    let ty = map_type_with(&f.ty, f.span, Some(&self.structs))?;
+                    let ty = map_type_with(&f.ty, f.span, Some(&self.structs), Some(&self.enums))?;
                     fields.push((f.name.clone(), ty));
                 }
                 self.structs.insert(s.name.clone(), fields);
@@ -197,6 +217,47 @@ impl Codegen {
                 }
                 writeln!(self.type_defs, "}} {};\n", s.name).unwrap();
             }
+        }
+
+        // Pass 1d: emit tagged-union typedef for each enum.
+        // The shape is:
+        //     typedef enum { T_V1_TAG, T_V2_TAG, ... } T_Tag;
+        //     typedef struct T {
+        //         T_Tag tag;
+        //         union {
+        //             struct { /* payload fields _0, _1, ... */ } V1;
+        //             struct { } V2;
+        //             ...
+        //         } as;
+        //     } T;
+        // Nullary variants get an empty struct (allowed in GNU/clang C; for
+        // strict C99 we keep at least a dummy field).
+        let enum_decls: Vec<EnumDecl> = prog.items.iter().filter_map(|it| {
+            if let Item::Enum(e) = it { Some(e.clone()) } else { None }
+        }).collect();
+        for e in &enum_decls {
+            writeln!(self.type_defs, "typedef enum {{").unwrap();
+            for v in &e.variants {
+                writeln!(self.type_defs, "    {}_{}_TAG,", e.name, v.name).unwrap();
+            }
+            writeln!(self.type_defs, "}} {}_Tag;", e.name).unwrap();
+            writeln!(self.type_defs, "typedef struct {} {{", e.name).unwrap();
+            writeln!(self.type_defs, "    {}_Tag tag;", e.name).unwrap();
+            writeln!(self.type_defs, "    union {{").unwrap();
+            for v in &e.variants {
+                if v.payload.is_empty() {
+                    writeln!(self.type_defs, "        struct {{ char _dummy; }} {};", v.name).unwrap();
+                } else {
+                    writeln!(self.type_defs, "        struct {{").unwrap();
+                    for (i, p) in v.payload.iter().enumerate() {
+                        let ty = map_type_with(p, v.span, Some(&self.structs), Some(&self.enums))?;
+                        writeln!(self.type_defs, "            {} _{};", ty.c_decl(), i).unwrap();
+                    }
+                    writeln!(self.type_defs, "        }} {};", v.name).unwrap();
+                }
+            }
+            writeln!(self.type_defs, "    }} as;").unwrap();
+            writeln!(self.type_defs, "}} {};\n", e.name).unwrap();
         }
 
         // Pass 2: collect function signatures (free + impl methods).
@@ -242,6 +303,7 @@ impl Codegen {
                     self.scopes.last_mut().map(|s| s.insert(c.name.clone(), ty));
                 }
                 Item::Struct(_) => {} // already emitted in pass 1c
+                Item::Enum(_) => {}   // already emitted in pass 1d
                 _ => unreachable!(),
             }
         }
@@ -285,11 +347,11 @@ impl Codegen {
                 ))?;
                 params.push(CType::Struct(target.to_string()));
             } else {
-                params.push(map_type_with(&p.ty, p.span, Some(&self.structs))?);
+                params.push(map_type_with(&p.ty, p.span, Some(&self.structs), Some(&self.enums))?);
             }
         }
         let ret = match &f.return_type {
-            Some(t) => map_type_with(t, f.span, Some(&self.structs))?,
+            Some(t) => map_type_with(t, f.span, Some(&self.structs), Some(&self.enums))?,
             None => CType::Void,
         };
         let name = match impl_target {
@@ -456,6 +518,9 @@ impl Codegen {
             Stmt::Continue(_) => {
                 writeln!(self.body, "{}continue;", self.pad()).unwrap();
             }
+            Stmt::Match { scrutinee, arms, span } => {
+                self.emit_match(scrutinee, arms, *span)?;
+            }
             Stmt::Expr(e) => {
                 // a bare call (typically `print(...)`)
                 if let ExprKind::Call(callee, args) = &e.kind {
@@ -475,6 +540,144 @@ impl Codegen {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Lower a `match` statement to a C `switch`.
+    /// Supports enum-variant patterns + a single wildcard / bind catch-all.
+    /// Literal patterns are out of scope for now.
+    fn emit_match(&mut self, scrut: &Expr, arms: &[MatchArm], span: Span) -> Result<(), LingoError> {
+        let (scrut_code, scrut_ty) = self.gen_expr(scrut)?;
+        let enum_name = match &scrut_ty {
+            CType::Enum(n) => n.clone(),
+            _ => {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `match` only supports enum scrutinees in v0.1.9",
+                    span,
+                ));
+            }
+        };
+        // Stash scrutinee into a local so subpattern bindings can reference it.
+        let tmp = format!("__match_{}", self.indent);
+        writeln!(self.body, "{}{} {} = {};", self.pad(), enum_name, tmp, scrut_code).unwrap();
+        writeln!(self.body, "{}switch ({}.tag) {{", self.pad(), tmp).unwrap();
+        let mut had_default = false;
+        let decl = self.enums.get(&enum_name).cloned().unwrap();
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Variant { type_name, variant, sub, span: pat_span } => {
+                    // sanity: type_name (if given) must match the scrutinee.
+                    if let Some(tn) = type_name {
+                        if tn != &enum_name {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("pattern type `{}` doesn't match scrutinee type `{}`", tn, enum_name),
+                                *pat_span,
+                            ));
+                        }
+                    }
+                    let v = decl.variants.iter().find(|v| v.name == *variant).ok_or_else(|| {
+                        LingoError::new(
+                            Stage::Resolve,
+                            format!("`{}` has no variant `{}`", enum_name, variant),
+                            *pat_span,
+                        )
+                    })?;
+                    if sub.len() != v.payload.len() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("variant `{}.{}` binds {} values, pattern has {}",
+                                    enum_name, variant, v.payload.len(), sub.len()),
+                            *pat_span,
+                        ));
+                    }
+                    writeln!(self.body, "{}case {}_{}_TAG: {{",
+                             self.pad(), enum_name, variant).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    // bind payload subpatterns: only `Bind(name)` and `Wildcard` allowed.
+                    for (i, sp) in sub.iter().enumerate() {
+                        match sp {
+                            Pattern::Wildcard(_) => {}
+                            Pattern::Bind(name, sp_span) => {
+                                let ty = map_type_with(
+                                    &v.payload[i],
+                                    *sp_span,
+                                    Some(&self.structs),
+                                    Some(&self.enums),
+                                )?;
+                                writeln!(self.body, "{}{} {} = {}.as.{}._{};",
+                                         self.pad(), ty.c_decl(), name, tmp, variant, i).unwrap();
+                                self.scopes.last_mut().unwrap().insert(name.clone(), ty);
+                            }
+                            _ => {
+                                return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    "C backend: nested patterns aren't supported in v0.1.9 \
+                                     (only `name` or `_` inside variants)",
+                                    *pat_span,
+                                ));
+                            }
+                        }
+                    }
+                    for s in &arm.body.stmts {
+                        self.emit_stmt(s)?;
+                    }
+                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                    self.scopes.pop();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                }
+                Pattern::Wildcard(_) => {
+                    writeln!(self.body, "{}default: {{", self.pad()).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    for s in &arm.body.stmts {
+                        self.emit_stmt(s)?;
+                    }
+                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                    self.scopes.pop();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                    had_default = true;
+                }
+                Pattern::Bind(name, _) => {
+                    writeln!(self.body, "{}default: {{", self.pad()).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    writeln!(self.body, "{}{} {} = {};",
+                             self.pad(), enum_name, name, tmp).unwrap();
+                    self.scopes.last_mut().unwrap().insert(name.clone(), CType::Enum(enum_name.clone()));
+                    for s in &arm.body.stmts {
+                        self.emit_stmt(s)?;
+                    }
+                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                    self.scopes.pop();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                    had_default = true;
+                }
+                Pattern::Literal(_, lit_span) => {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: literal patterns land in v0.2 (need int/bool scrutinees)",
+                        *lit_span,
+                    ));
+                }
+            }
+        }
+        // If no default arm was provided, guarantee the switch is total
+        // (otherwise some C compilers warn).  We don't try to be smart
+        // about exhaustiveness — that's the type checker's job.
+        if !had_default {
+            // We tell the C compiler the switch is total. If a future variant
+            // is added without updating the match, we hit UB at runtime —
+            // that's the trade-off for getting clean warnings today. A real
+            // exhaustiveness checker (Phase 1.5) will catch this at compile time.
+            writeln!(self.body, "{}default: __builtin_unreachable();", self.pad()).unwrap();
+        }
+        writeln!(self.body, "{}}}", self.pad()).unwrap();
         Ok(())
     }
 
@@ -534,6 +737,24 @@ impl Codegen {
                 ("self".to_string(), ty)
             }
             ExprKind::Field(receiver, name) => {
+                // Bare nullary variant reference: `Foo.Bar` (no Call wrapping).
+                if let ExprKind::Ident(id) = &receiver.kind {
+                    if let Some(decl) = self.enums.get(id).cloned() {
+                        if let Some(v) = decl.variants.iter().find(|v| v.name == *name) {
+                            if !v.payload.is_empty() {
+                                return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    format!("variant `{}.{}` needs arguments", id, name),
+                                    e.span,
+                                ));
+                            }
+                            return Ok((
+                                format!("(({}){{ .tag = {}_{}_TAG }})", id, id, name),
+                                CType::Enum(id.clone()),
+                            ));
+                        }
+                    }
+                }
                 // Plain field read: lower to `receiver.field`.
                 // We disallow this on type names (those are static-method refs,
                 // which can only appear inside a Call — handled in gen_call).
@@ -680,6 +901,56 @@ impl Codegen {
         }
     }
 
+    /// Construct an enum value: `Foo.Bar(x, y)` → `(Foo){ .tag = Foo_Bar_TAG, .as.Bar = { ._0 = x, ._1 = y } }`.
+    fn gen_enum_ctor(
+        &mut self,
+        type_name: &str,
+        decl: &EnumDecl,
+        variant: &str,
+        args: &[Arg],
+        span: Span,
+    ) -> Result<(String, CType), LingoError> {
+        let v = decl.variants.iter().find(|v| v.name == variant).ok_or_else(|| {
+            LingoError::new(
+                Stage::Resolve,
+                format!("`{}` has no variant `{}`", type_name, variant),
+                span,
+            )
+        })?;
+        if args.len() != v.payload.len() {
+            return Err(LingoError::new(
+                Stage::Resolve,
+                format!("variant `{}.{}` expects {} payload value(s), got {}",
+                        type_name, variant, v.payload.len(), args.len()),
+                span,
+            ));
+        }
+        let tag = format!("{}_{}_TAG", type_name, variant);
+        if args.is_empty() {
+            return Ok((
+                format!("(({}){{ .tag = {} }})", type_name, tag),
+                CType::Enum(type_name.to_string()),
+            ));
+        }
+        let mut parts = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            if a.name.is_some() {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    "variant payload must be positional",
+                    a.span,
+                ));
+            }
+            let (code, _) = self.gen_expr(&a.value)?;
+            parts.push(format!("._{} = {}", i, code));
+        }
+        Ok((
+            format!("(({}){{ .tag = {}, .as.{} = {{ {} }} }})",
+                    type_name, tag, variant, parts.join(", ")),
+            CType::Enum(type_name.to_string()),
+        ))
+    }
+
     fn gen_call(&mut self, callee: &Expr, args: &[Arg], span: Span) -> Result<(String, CType), LingoError> {
         // Three call shapes we recognize:
         //   1. `foo(args)`            — free function
@@ -688,6 +959,12 @@ impl Codegen {
         let (mangled, prepend_self_code) = match &callee.kind {
             ExprKind::Ident(s) => (s.clone(), None),
             ExprKind::Field(receiver, method) => {
+                // Enum variant constructor: `Type.Variant(args)`
+                if let ExprKind::Ident(id) = &receiver.kind {
+                    if let Some(enum_decl) = self.enums.get(id).cloned() {
+                        return self.gen_enum_ctor(id, &enum_decl, method, args, span);
+                    }
+                }
                 // Static call when the receiver is a known struct name.
                 if let ExprKind::Ident(id) = &receiver.kind {
                     if self.structs.contains_key(id) {
