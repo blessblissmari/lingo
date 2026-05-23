@@ -24,12 +24,13 @@
 - [x] **string methods** `.len/.contains/.starts_with/.ends_with/.to_lower/.to_upper/.trim/.split/.replace`
 - [x] **for** over range / vec / str
 - [x] **error types** `fn foo() -> T ! E:` + `raise` + `?` propagation + `match ok(v) / err(e)`
-- [ ] desugaring pass: `f"..."` → string concat
+- [x] **f-strings** `f"hi {name}, sum = {a + b}"` with arbitrary expressions inside `{...}`
+- [x] **map[K, V]** literal `map{key: val, key: val}` + `.len/.has/.get/.set/.remove/.keys/.values/.clear`
+- [x] **utf-8 in string literals** (lexer copies full codepoints, not bytes)
 - [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
 - [ ] traits (`trait` + `impl Trait for Type`)
 - [ ] auto-wrap `?` via `From` (needs traits)
-- [ ] `map[K, V]` literals + methods
 - [ ] generics (monomorphized — interpreter currently ignores type args)
 - [ ] explicit allocators + `defer`
 - [ ] 500-program test suite, mostly hand-written, partly llm-generated
