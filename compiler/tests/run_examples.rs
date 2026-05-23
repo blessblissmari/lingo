@@ -114,6 +114,20 @@ unique words: 9
 }
 
 #[test]
+fn tour() {
+    let (stdout, stderr, code) = run("tour.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+|p|^2 = 25
+total area = 41
+good morning, артём — feeling dangerous?
+unique words: 4
+parsed: 42
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
 fn io_roundtrip() {
     let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
     assert_eq!(code, 0, "stderr: {stderr}");
