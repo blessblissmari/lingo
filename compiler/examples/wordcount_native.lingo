@@ -1,0 +1,18 @@
+# word frequency with map[str, i64] — the C backend version.
+# v0.1.15: empty `map{}` literals only; build via .set(); has()-check
+# before get() if you need to distinguish "missing" from "value 0".
+
+fn main():
+    let text = "the quick brown fox jumps over the lazy dog the fox is quick"
+    let words = text.split(" ")
+
+    let mut counts: map[str, i64] = map{}
+    for w in words:
+        if counts.has(w):
+            counts.set(w, counts.get(w) + 1)
+        else:
+            counts.set(w, 1)
+
+    print(f"unique: {counts.len()}")
+    for k in counts.keys():
+        print(f"{k}: {counts.get(k)}")
