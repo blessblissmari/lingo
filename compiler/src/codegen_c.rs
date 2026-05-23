@@ -413,9 +413,9 @@ impl Codegen {
         // for v0.1.12: data lifetime tracks the enclosing C block.  When the
         // allocator story lands, this grows to an owning vector with cap +
         // realloc, without changing the public API (`len`/`get`).
-        out.push_str("typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\n");
-        out.push_str("typedef struct { const double*  data; int64_t len; } lingo_vec_f64_t;\n");
-        out.push_str("typedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\n");
+        out.push_str("typedef struct { int64_t* data; int64_t len; int64_t cap; } lingo_vec_i64_t;\n");
+        out.push_str("typedef struct { double*  data; int64_t len; int64_t cap; } lingo_vec_f64_t;\n");
+        out.push_str("typedef struct { const char** data; int64_t len; int64_t cap; } lingo_vec_str_t;\n");
         out.push_str("typedef struct { const char** keys; int64_t* vals; int64_t len; int64_t cap; } lingo_map_str_i64_t;\n\n");
         if !self.type_defs.is_empty() {
             out.push_str(&self.type_defs);
@@ -1171,9 +1171,10 @@ impl Codegen {
                 if items.is_empty() {
                     // Empty literal — we can't infer the element type; default to
                     // i64 for now.  Once we have a type checker it can fix this
-                    // from context (e.g. variable annotation).
+                    // from context (e.g. variable annotation).  The returned
+                    // value is an owning empty vec — `push` works on it.
                     return Ok((
-                        "((lingo_vec_i64_t){ .data = NULL, .len = 0 })".to_string(),
+                        "lingo_vec_i64_new()".to_string(),
                         CType::Vec(Box::new(CType::I64)),
                     ));
                 }
@@ -1203,14 +1204,34 @@ impl Codegen {
                     parts.push(code);
                 }
                 let vec_ty = CType::Vec(Box::new(first_ty.clone()));
-                let elem_c = first_ty.c_decl();
+                let suffix = match &first_ty {
+                    CType::I64 => "i64",
+                    CType::F64 => "f64",
+                    CType::Str => "str",
+                    _ => unreachable!("checked above"),
+                };
+                // Lower the literal to a GCC statement-expression that builds
+                // an owning vec and pushes each element.  Stmt-exprs are
+                // supported by gcc and clang (our only two backends).  The
+                // resulting vec lives as long as the surrounding scope holds
+                // its `data` pointer (we never free; allocator/defer story
+                // ships in v0.2).
+                let tmp = format!("__lv{}", self.tmp_counter);
+                self.tmp_counter += 1;
+                let mut pushes = String::new();
+                for p in &parts {
+                    pushes.push_str(&format!(
+                        "lingo_vec_{}_push(&{}, {}); ",
+                        suffix, tmp, p
+                    ));
+                }
                 (
                     format!(
-                        "(({}){{ .data = ({}[]){{ {} }}, .len = {} }})",
-                        vec_ty.c_decl(),
-                        elem_c,
-                        parts.join(", "),
-                        items.len()
+                        "({{ {ty} {tmp} = lingo_vec_{sfx}_new(); {pushes}{tmp}; }})",
+                        ty = vec_ty.c_decl(),
+                        tmp = tmp,
+                        sfx = suffix,
+                        pushes = pushes,
                     ),
                     vec_ty,
                 )
@@ -1531,12 +1552,15 @@ impl Codegen {
         }
     }
 
-    /// Built-in methods on `vec[T]` for T ∈ {i64, f64, str}.  Subset for v0.1.14:
-    ///   - `v.len()`     -> `(v).len`              : i64
-    ///   - `v.get(i)`    -> `(v).data[i]`          : T   (no bounds check yet)
-    ///   - `v.push/.pop/.set` not yet — need an allocator
+    /// Built-in methods on `vec[T]` for T ∈ {i64, f64, str}.  v0.1.17:
+    ///   - `v.len()`        -> `(v).len`                       : i64
+    ///   - `v.get(i)`       -> `(v).data[i]`                   : T   (no bounds check)
+    ///   - `v.push(x)`      -> `lingo_vec_T_push(&v, x)`       : void  (recv must be plain ident)
+    ///   - `v.pop()`        -> `lingo_vec_T_pop(&v)`           : T     (recv must be plain ident)
+    ///   - `v.set(i, x)`    -> `lingo_vec_T_set(&v, i, x)`     : void  (recv must be plain ident)
     fn gen_vec_method(
         &mut self,
+        recv: &Expr,
         recv_code: &str,
         recv_ty: &CType,
         method: &str,
@@ -1546,6 +1570,23 @@ impl Codegen {
         let elem_ty = match recv_ty {
             CType::Vec(inner) => (**inner).clone(),
             _ => unreachable!("gen_vec_method called with non-vec receiver"),
+        };
+        let elem_suffix = match &elem_ty {
+            CType::I64 => "i64",
+            CType::F64 => "f64",
+            CType::Str => "str",
+            other => return Err(LingoError::new(
+                Stage::Resolve,
+                format!("C backend: vec element type `{}` not supported in methods", other.c_decl()),
+                span,
+            )),
+        };
+        // Mutating methods need an addressable lvalue.  We only allow a
+        // plain identifier as the receiver (same restriction as `map.set`).
+        let recv_ident = if let ExprKind::Ident(name) = &recv.kind {
+            Some(name.clone())
+        } else {
+            None
         };
         match (method, args.len()) {
             ("len", 0) => Ok((format!("({}).len", recv_code), CType::I64)),
@@ -1567,10 +1608,78 @@ impl Codegen {
                 }
                 Ok((format!("({}).data[(size_t)({})]", recv_code, i_code), elem_ty))
             }
+            ("push", 1) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.push` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                if args[0].name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `vec.push` takes a positional value",
+                        args[0].span,
+                    ));
+                }
+                let (x_code, x_ty) = self.gen_expr(&args[0].value)?;
+                if x_ty != elem_ty {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `vec.push` value must be `{}`, got `{}`",
+                                elem_ty.c_decl(), x_ty.c_decl()),
+                        args[0].span,
+                    ));
+                }
+                writeln!(self.body, "{}lingo_vec_{}_push(&{}, {});",
+                         self.pad(), elem_suffix, ident, x_code).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
+            ("pop", 0) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.pop` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                Ok((format!("lingo_vec_{}_pop(&{})", elem_suffix, ident), elem_ty))
+            }
+            ("set", 2) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.set` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                if args[0].name.is_some() || args[1].name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `vec.set` takes positional args (i, value)",
+                        span,
+                    ));
+                }
+                let (i_code, i_ty) = self.gen_expr(&args[0].value)?;
+                if i_ty != CType::I64 {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `vec.set` index must be i64, got `{}`", i_ty.c_decl()),
+                        args[0].span,
+                    ));
+                }
+                let (x_code, x_ty) = self.gen_expr(&args[1].value)?;
+                if x_ty != elem_ty {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `vec.set` value must be `{}`, got `{}`",
+                                elem_ty.c_decl(), x_ty.c_decl()),
+                        args[1].span,
+                    ));
+                }
+                writeln!(self.body, "{}lingo_vec_{}_set(&{}, {}, {});",
+                         self.pad(), elem_suffix, ident, i_code, x_code).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `vec.{}` with {} arg(s) is not supported yet \
-                         (have: len/0, get/1)", m, n),
+                         (have: len/0, get/1, push/1, pop/0, set/2)", m, n),
                 span,
             )),
         }
@@ -1600,7 +1709,7 @@ impl Codegen {
                 if !receiver_is_type_name {
                     let probe = self.gen_expr(receiver)?;
                     if matches!(probe.1, CType::Vec(_)) {
-                        return self.gen_vec_method(&probe.0, &probe.1, method, args, span);
+                        return self.gen_vec_method(receiver, &probe.0, &probe.1, method, args, span);
                     }
                     if matches!(probe.1, CType::Map(_, _)) {
                         return self.gen_map_method(receiver, &probe.0, method, args, span);
@@ -1861,7 +1970,7 @@ static lingo_vec_str_t lingo_str_split(const char* s, const char* sep) {
         if (!end) break;
         start = end + sep_len;
     }
-    return (lingo_vec_str_t){ .data = arr, .len = (int64_t)count };
+    return (lingo_vec_str_t){ .data = arr, .len = (int64_t)count, .cap = (int64_t)count };
 }
 
 /* === map[str, i64] runtime (v0.1.15) ===
@@ -1909,7 +2018,7 @@ static lingo_vec_str_t lingo_map_str_i64_keys(const lingo_map_str_i64_t* m) {
     const char** arr = (const char**)malloc((size_t)m->len * sizeof(const char*));
     if (!arr && m->len > 0) { fprintf(stderr, \"lingo: oom in map_keys\\n\"); exit(1); }
     for (int64_t i = 0; i < m->len; i++) arr[i] = m->keys[i];
-    return (lingo_vec_str_t){ .data = arr, .len = m->len };
+    return (lingo_vec_str_t){ .data = arr, .len = m->len, .cap = m->len };
 }
 
 /* Two-pass snprintf into a fresh heap buffer.  Returned `const char*` leaks
@@ -1931,6 +2040,101 @@ static const char* lingo_fmt_alloc(const char* fmt, ...) {
     return out;
 }
 
+/* === owning vec runtime (v0.1.17) ===
+ * Growable, heap-backed `vec[T]`.  `new` starts empty (cap 0).  `push`
+ * doubles cap when full (starting at 4).  `pop` returns the popped element
+ * and shrinks `len`; on empty it aborts (lingo programs that want safe pop
+ * should check `.len()` first — interp returns `none`, but we have no Option
+ * in native yet).  `set` bounds-checks.  Data buffers leak on purpose until
+ * the allocator + `defer` story lands in v0.2.
+ */
+__attribute__((unused))
+static lingo_vec_i64_t lingo_vec_i64_new(void) {
+    lingo_vec_i64_t v = { NULL, 0, 0 };
+    return v;
+}
+__attribute__((unused))
+static void lingo_vec_i64_push(lingo_vec_i64_t* v, int64_t x) {
+    if (v->len == v->cap) {
+        int64_t nc = v->cap == 0 ? 4 : v->cap * 2;
+        v->data = (int64_t*)realloc(v->data, (size_t)nc * sizeof(int64_t));
+        if (!v->data) { fprintf(stderr, \"lingo: oom in vec_i64_push\\n\"); exit(1); }
+        v->cap = nc;
+    }
+    v->data[v->len++] = x;
+}
+__attribute__((unused))
+static int64_t lingo_vec_i64_pop(lingo_vec_i64_t* v) {
+    if (v->len == 0) { fprintf(stderr, \"lingo: vec.pop on empty vec\\n\"); exit(1); }
+    return v->data[--v->len];
+}
+__attribute__((unused))
+static void lingo_vec_i64_set(lingo_vec_i64_t* v, int64_t i, int64_t x) {
+    if (i < 0 || i >= v->len) {
+        fprintf(stderr, \"lingo: vec.set index %\" PRId64 \" out of bounds (len %\" PRId64 \")\\n\", i, v->len);
+        exit(1);
+    }
+    v->data[i] = x;
+}
+
+__attribute__((unused))
+static lingo_vec_f64_t lingo_vec_f64_new(void) {
+    lingo_vec_f64_t v = { NULL, 0, 0 };
+    return v;
+}
+__attribute__((unused))
+static void lingo_vec_f64_push(lingo_vec_f64_t* v, double x) {
+    if (v->len == v->cap) {
+        int64_t nc = v->cap == 0 ? 4 : v->cap * 2;
+        v->data = (double*)realloc(v->data, (size_t)nc * sizeof(double));
+        if (!v->data) { fprintf(stderr, \"lingo: oom in vec_f64_push\\n\"); exit(1); }
+        v->cap = nc;
+    }
+    v->data[v->len++] = x;
+}
+__attribute__((unused))
+static double lingo_vec_f64_pop(lingo_vec_f64_t* v) {
+    if (v->len == 0) { fprintf(stderr, \"lingo: vec.pop on empty vec\\n\"); exit(1); }
+    return v->data[--v->len];
+}
+__attribute__((unused))
+static void lingo_vec_f64_set(lingo_vec_f64_t* v, int64_t i, double x) {
+    if (i < 0 || i >= v->len) {
+        fprintf(stderr, \"lingo: vec.set index %\" PRId64 \" out of bounds (len %\" PRId64 \")\\n\", i, v->len);
+        exit(1);
+    }
+    v->data[i] = x;
+}
+
+__attribute__((unused))
+static lingo_vec_str_t lingo_vec_str_new(void) {
+    lingo_vec_str_t v = { NULL, 0, 0 };
+    return v;
+}
+__attribute__((unused))
+static void lingo_vec_str_push(lingo_vec_str_t* v, const char* x) {
+    if (v->len == v->cap) {
+        int64_t nc = v->cap == 0 ? 4 : v->cap * 2;
+        v->data = (const char**)realloc((void*)v->data, (size_t)nc * sizeof(const char*));
+        if (!v->data) { fprintf(stderr, \"lingo: oom in vec_str_push\\n\"); exit(1); }
+        v->cap = nc;
+    }
+    v->data[v->len++] = x;
+}
+__attribute__((unused))
+static const char* lingo_vec_str_pop(lingo_vec_str_t* v) {
+    if (v->len == 0) { fprintf(stderr, \"lingo: vec.pop on empty vec\\n\"); exit(1); }
+    return v->data[--v->len];
+}
+__attribute__((unused))
+static void lingo_vec_str_set(lingo_vec_str_t* v, int64_t i, const char* x) {
+    if (i < 0 || i >= v->len) {
+        fprintf(stderr, \"lingo: vec.set index %\" PRId64 \" out of bounds (len %\" PRId64 \")\\n\", i, v->len);
+        exit(1);
+    }
+    v->data[i] = x;
+}
+
 ";
     // Insert helper right before the protos section.
     // (Protos always start after the three #include lines + blank.)
@@ -1941,7 +2145,7 @@ static const char* lingo_fmt_alloc(const char* fmt, ...) {
     // Marker is the chunk at the *end* of the prelude block, right after which
     // the helper splice goes — and crucially, the splice goes *after* the
     // `lingo_vec_<T>_t` typedefs (because the helpers reference them).
-    let marker = "typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\ntypedef struct { const double*  data; int64_t len; } lingo_vec_f64_t;\ntypedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\ntypedef struct { const char** keys; int64_t* vals; int64_t len; int64_t cap; } lingo_map_str_i64_t;\n\n";
+    let marker = "typedef struct { int64_t* data; int64_t len; int64_t cap; } lingo_vec_i64_t;\ntypedef struct { double*  data; int64_t len; int64_t cap; } lingo_vec_f64_t;\ntypedef struct { const char** data; int64_t len; int64_t cap; } lingo_vec_str_t;\ntypedef struct { const char** keys; int64_t* vals; int64_t len; int64_t cap; } lingo_map_str_i64_t;\n\n";
     Ok(match core.find(marker) {
         Some(idx) => {
             let split = idx + marker.len();
