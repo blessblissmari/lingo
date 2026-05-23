@@ -12,7 +12,9 @@
 //!   - arithmetic, comparison, boolean ops, `**`, `%`, `..` ranges
 //!   - `print(...)` builtin
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::ast::*;
 use crate::error::{LingoError, Span, Stage};
@@ -24,6 +26,7 @@ pub enum Value {
     Bool(bool),
     Str(String),
     Range(i64, i64),
+    Vec_(Rc<RefCell<Vec<Value>>>),
     Struct {
         type_name: String,
         fields: HashMap<String, Value>,
@@ -44,6 +47,7 @@ impl Value {
             Value::Bool(_) => "bool".into(),
             Value::Str(_) => "str".into(),
             Value::Range(_, _) => "range".into(),
+            Value::Vec_(_) => "vec".into(),
             Value::Struct { type_name, .. } => type_name.clone(),
             Value::Enum { type_name, .. } => type_name.clone(),
             Value::None_ => "none".into(),
@@ -57,6 +61,10 @@ impl Value {
             Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
             Value::Str(s) => s.clone(),
             Value::Range(a, b) => format!("{a}..{b}"),
+            Value::Vec_(rc) => {
+                let parts: Vec<String> = rc.borrow().iter().map(|v| v.display()).collect();
+                format!("vec[{}]", parts.join(", "))
+            }
             Value::Struct { type_name, fields } => {
                 let mut parts: Vec<String> = fields
                     .iter()
@@ -406,21 +414,24 @@ impl Interp {
             }
             Stmt::For { var, iter, body, span: _ } => {
                 let it = self.eval(iter)?;
-                let (lo, hi) = match it {
-                    Value::Range(a, b) => (a, b),
+                // collect the items to iterate (snapshot — no mutation of the source during the loop)
+                let items: Vec<Value> = match it {
+                    Value::Range(a, b) => (a..b).map(Value::Int).collect(),
+                    Value::Vec_(rc) => rc.borrow().clone(),
+                    Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
                     v => {
                         return Err(LingoError::new(
                             Stage::Runtime,
-                            format!("`for` needs a range, got {}", v.type_name()),
+                            format!("`for` needs a range, vec, or str, got {}", v.type_name()),
                             iter.span,
                         ))
                     }
                 };
-                for n in lo..hi {
+                for v in items {
                     self.scopes.push(Scope { bindings: HashMap::new() });
                     self.scopes.last_mut().unwrap().bindings.insert(
                         var.clone(),
-                        Binding { value: Value::Int(n), is_mut: false },
+                        Binding { value: v, is_mut: false },
                     );
                     let flow = self.exec_block_inline(body)?;
                     self.scopes.pop();
@@ -728,6 +739,13 @@ impl Interp {
                 Ok(Value::Range(a, b))
             }
             ExprKind::Call(callee, args) => self.eval_call(callee, args, e.span),
+            ExprKind::VecLit(items) => {
+                let mut vals = Vec::with_capacity(items.len());
+                for it in items {
+                    vals.push(self.eval(it)?);
+                }
+                Ok(Value::Vec_(Rc::new(RefCell::new(vals))))
+            }
         }
     }
 
@@ -811,13 +829,17 @@ impl Interp {
             }
             // method call on a value: receiver.method(args)
             let receiver = self.eval(lhs)?;
+            // builtin methods on `vec` and `str`
+            if let Some(v) = self.call_builtin_method(&receiver, vname, args, call_span)? {
+                return Ok(v);
+            }
             let type_name = match &receiver {
                 Value::Struct { type_name, .. } => type_name.clone(),
                 Value::Enum { type_name, .. } => type_name.clone(),
                 v => {
                     return Err(LingoError::new(
                         Stage::Runtime,
-                        format!("cannot call methods on {}", v.type_name()),
+                        format!("no method `{}` on {}", vname, v.type_name()),
                         callee.span,
                     ))
                 }
@@ -877,6 +899,144 @@ impl Interp {
             })?;
         let values = self.resolve_args(&decl, args, call_span)?;
         self.call_fn(&decl, values)
+    }
+
+    /// Returns Ok(Some(v)) if `method` is a builtin on `receiver`, Ok(None) if not a builtin.
+    fn call_builtin_method(
+        &mut self,
+        receiver: &Value,
+        method: &str,
+        args: &[Arg],
+        call_span: Span,
+    ) -> Result<Option<Value>, LingoError> {
+        // helper: eval all args, reject keyword args
+        let eval_positional = |this: &mut Self, args: &[Arg]| -> Result<Vec<Value>, LingoError> {
+            let mut out = Vec::new();
+            for a in args {
+                if a.name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Runtime,
+                        "builtin methods don't take keyword arguments",
+                        a.span,
+                    ));
+                }
+                out.push(this.eval(&a.value)?);
+            }
+            Ok(out)
+        };
+        match receiver {
+            Value::Vec_(rc) => {
+                let vals = eval_positional(self, args)?;
+                match (method, vals.len()) {
+                    ("len", 0) => Ok(Some(Value::Int(rc.borrow().len() as i64))),
+                    ("push", 1) => {
+                        rc.borrow_mut().push(vals.into_iter().next().unwrap());
+                        Ok(Some(Value::None_))
+                    }
+                    ("pop", 0) => {
+                        let popped = rc.borrow_mut().pop();
+                        Ok(Some(match popped {
+                            Some(v) => v,
+                            None => Value::None_,
+                        }))
+                    }
+                    ("get", 1) => {
+                        let idx = match &vals[0] {
+                            Value::Int(n) => *n,
+                            v => return Err(LingoError::new(Stage::Runtime,
+                                format!("vec.get expects int, got {}", v.type_name()), call_span)),
+                        };
+                        let borrow = rc.borrow();
+                        let len = borrow.len() as i64;
+                        if idx < 0 || idx >= len {
+                            return Err(LingoError::new(Stage::Runtime,
+                                format!("vec.get index {} out of bounds (len {})", idx, len), call_span));
+                        }
+                        Ok(Some(borrow[idx as usize].clone()))
+                    }
+                    ("set", 2) => {
+                        let idx = match &vals[0] {
+                            Value::Int(n) => *n,
+                            v => return Err(LingoError::new(Stage::Runtime,
+                                format!("vec.set expects int index, got {}", v.type_name()), call_span)),
+                        };
+                        let mut borrow = rc.borrow_mut();
+                        let len = borrow.len() as i64;
+                        if idx < 0 || idx >= len {
+                            return Err(LingoError::new(Stage::Runtime,
+                                format!("vec.set index {} out of bounds (len {})", idx, len), call_span));
+                        }
+                        borrow[idx as usize] = vals.into_iter().nth(1).unwrap();
+                        Ok(Some(Value::None_))
+                    }
+                    ("contains", 1) => {
+                        let needle = &vals[0];
+                        let found = rc.borrow().iter().any(|v| values_eq(v, needle));
+                        Ok(Some(Value::Bool(found)))
+                    }
+                    ("clear", 0) => {
+                        rc.borrow_mut().clear();
+                        Ok(Some(Value::None_))
+                    }
+                    ("reverse", 0) => {
+                        rc.borrow_mut().reverse();
+                        Ok(Some(Value::None_))
+                    }
+                    (m, n) => Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("no method `vec.{}` with {} arg(s) (known: len/push/pop/get/set/contains/clear/reverse)", m, n),
+                        call_span,
+                    )),
+                }
+            }
+            Value::Str(s) => {
+                let vals = eval_positional(self, args)?;
+                let need_str = |v: &Value, n: &str| -> Result<String, LingoError> {
+                    if let Value::Str(s) = v { Ok(s.clone()) } else {
+                        Err(LingoError::new(Stage::Runtime,
+                            format!("str.{} expects str, got {}", n, v.type_name()), call_span))
+                    }
+                };
+                match (method, vals.len()) {
+                    ("len", 0) => Ok(Some(Value::Int(s.chars().count() as i64))),
+                    ("contains", 1) => {
+                        let needle = need_str(&vals[0], "contains")?;
+                        Ok(Some(Value::Bool(s.contains(&needle))))
+                    }
+                    ("starts_with", 1) => {
+                        let n = need_str(&vals[0], "starts_with")?;
+                        Ok(Some(Value::Bool(s.starts_with(&n))))
+                    }
+                    ("ends_with", 1) => {
+                        let n = need_str(&vals[0], "ends_with")?;
+                        Ok(Some(Value::Bool(s.ends_with(&n))))
+                    }
+                    ("to_lower", 0) => Ok(Some(Value::Str(s.to_lowercase()))),
+                    ("to_upper", 0) => Ok(Some(Value::Str(s.to_uppercase()))),
+                    ("trim", 0) => Ok(Some(Value::Str(s.trim().to_string()))),
+                    ("split", 1) => {
+                        let sep = need_str(&vals[0], "split")?;
+                        let parts: Vec<Value> = if sep.is_empty() {
+                            s.chars().map(|c| Value::Str(c.to_string())).collect()
+                        } else {
+                            s.split(&sep).map(|p| Value::Str(p.to_string())).collect()
+                        };
+                        Ok(Some(Value::Vec_(Rc::new(RefCell::new(parts)))))
+                    }
+                    ("replace", 2) => {
+                        let from = need_str(&vals[0], "replace")?;
+                        let to = need_str(&vals[1], "replace")?;
+                        Ok(Some(Value::Str(s.replace(&from, &to))))
+                    }
+                    (m, n) => Err(LingoError::new(
+                        Stage::Runtime,
+                        format!("no method `str.{}` with {} arg(s) (known: len/contains/starts_with/ends_with/to_lower/to_upper/trim/split/replace)", m, n),
+                        call_span,
+                    )),
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     fn resolve_args(
@@ -1010,6 +1170,22 @@ fn bin_op(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, LingoError
         (Add, Str(a), Str(b)) => Str(a + &b),
         (op, l, r) => return type_err(op, &l, &r, span),
     })
+}
+
+fn values_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::None_, Value::None_) => true,
+        (Value::Enum { type_name: ta, variant: va, payload: pa },
+         Value::Enum { type_name: tb, variant: vb, payload: pb }) => {
+            ta == tb && va == vb && pa.len() == pb.len()
+                && pa.iter().zip(pb.iter()).all(|(x, y)| values_eq(x, y))
+        }
+        _ => false,
+    }
 }
 
 fn type_err(op: BinOp, l: &Value, r: &Value, span: Span) -> Result<Value, LingoError> {
