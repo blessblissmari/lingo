@@ -23,13 +23,12 @@
 - [x] **vec[T]** literal `vec[a, b, c]` + `.len/.push/.pop/.get/.set/.contains/.clear/.reverse`
 - [x] **string methods** `.len/.contains/.starts_with/.ends_with/.to_lower/.to_upper/.trim/.split/.replace`
 - [x] **for** over range / vec / str
-- [ ] desugaring pass:
-  - `?` → match
-  - `f"..."` → string concat
+- [x] **error types** `fn foo() -> T ! E:` + `raise` + `?` propagation + `match ok(v) / err(e)`
+- [ ] desugaring pass: `f"..."` → string concat
 - [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
 - [ ] traits (`trait` + `impl Trait for Type`)
-- [ ] error types (`! E`) and `?` propagation
+- [ ] auto-wrap `?` via `From` (needs traits)
 - [ ] `map[K, V]` literals + methods
 - [ ] generics (monomorphized — interpreter currently ignores type args)
 - [ ] explicit allocators + `defer`
