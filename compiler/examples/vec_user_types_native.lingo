@@ -1,0 +1,39 @@
+# vec of user-defined types (struct + enum), all native via the C backend.
+# Each user type gets its own monomorphized `vec[T]` typedef + helpers
+# emitted right next to the type itself.
+
+struct Point:
+    label: str
+    x: i64
+    y: i64
+
+enum Shape:
+    Circle(i64)
+    Square(i64)
+    Rect(i64, i64)
+
+fn area(s: Shape) -> i64:
+    match s:
+        Shape.Circle(r): return 3 * r * r        # pi ~= 3, kept integer to avoid f64 print drift
+        Shape.Square(a): return a * a
+        Shape.Rect(w, h): return w * h
+
+fn main():
+    # vec of structs — push/iterate/pop all work
+    let mut pts: vec[Point] = vec[]
+    pts.push(Point{label: "a", x: 0, y: 0})
+    pts.push(Point{label: "b", x: 3, y: 4})
+    pts.push(Point{label: "c", x: 5, y: 12})
+    print(f"pts.len={pts.len()}")
+    for p in pts:
+        print(f"{p.label}: ({p.x}, {p.y})")
+
+    # vec of enums with payloads
+    let shapes = vec[Shape.Circle(2), Shape.Square(3), Shape.Rect(4, 5)]
+    print(f"shapes.len={shapes.len()}")
+    for s in shapes:
+        print(area(s))
+
+    # pop returns the popped element
+    let last = pts.pop()
+    print(f"popped {last.label}, pts.len={pts.len()}")
