@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.21 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, and **`T ! E` + `?` + match-on-result in native** (the "errors as values" pitch fully runs as a compiled binary). 31/31 integration tests green.
+> ⚠️ **status:** v0.1.22 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, **`T ! E` + `?` + match-on-result**, and **f-string interpolation of `struct` / `enum` values in native** (the same debug form `print` uses). 33/33 integration tests green.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
