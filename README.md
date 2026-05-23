@@ -7,11 +7,29 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** design phase. no compiler yet — only the spec, examples and a roadmap.
+> ⚠️ **status:** v0.1 — design + a working lexer/parser/interpreter.
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
 
 ---
+
+## try it now
+
+```bash
+git clone https://github.com/blessblissmari/lingo
+cd lingo/compiler
+cargo run --release -- examples/hello.lingo
+# hello, lingo
+
+cargo run --release -- ../examples/fib.lingo
+# 0 1 1 2 3 5 8 13 21 34   (one per line)
+
+cargo test
+# 5 passed; 0 failed
+```
+
+requires rust 1.75+ (`rustup` will get you there).
+no other dependencies — the bootstrap compiler is zero-dep rust.
 
 ## why another language?
 
@@ -85,12 +103,30 @@ fn main(args: [str]) ! ParseError:
 9. **traits for behaviour, structs for data.** no inheritance.
 10. **LLVM backend + monomorphized generics** → target: within 10% of zig.
 
+## what works today
+
+the v0.1.0 compiler (in [`compiler/`](compiler/)) understands:
+
+- `fn` declarations with typed parameters and return type
+- `let` / `let mut` (shadowing is a compile error)
+- `if` / `elif` / `else`
+- `for i in 0..N:` (range loops)
+- `return`, `break`, `continue`
+- arithmetic, comparison, boolean ops, `**`, `%`
+- function calls with positional and keyword arguments
+  (keyword args **required** when a fn has >2 params)
+- `print(...)`, ints, floats, strings, bools
+
+what's coming in v0.1.x: structs, enums, traits, generics, error types,
+`?` propagation, explicit allocators, f-strings, `match`, the stdlib.
+see [`ROADMAP.md`](ROADMAP.md).
+
 ## examples
 
-- [`examples/hello.lingo`](examples/hello.lingo) — hello world
-- [`examples/fib.lingo`](examples/fib.lingo) — recursion + loops
-- [`examples/wordcount.lingo`](examples/wordcount.lingo) — file io, hashmap, errors
-- [`examples/http.lingo`](examples/http.lingo) — a tiny http server, structured concurrency
+- [`examples/hello.lingo`](examples/hello.lingo) — hello world ✅ runs
+- [`examples/fib.lingo`](examples/fib.lingo) — recursion + loops ✅ runs
+- [`examples/wordcount.lingo`](examples/wordcount.lingo) — file io, hashmap, errors (preview — needs v0.2)
+- [`examples/http.lingo`](examples/http.lingo) — tiny http server, structured concurrency (preview — needs v0.2)
 
 ## docs
 
@@ -99,10 +135,11 @@ fn main(args: [str]) ! ParseError:
 - [`docs/SYNTAX.md`](docs/SYNTAX.md) — full syntax reference (v0.1)
 - [`docs/GRAMMAR.bnf`](docs/GRAMMAR.bnf) — formal grammar sketch
 - [`ROADMAP.md`](ROADMAP.md) — what gets built, in what order
+- [`compiler/README.md`](compiler/README.md) — how the bootstrap compiler works
 
 ## roadmap (short)
 
-- **v0.1** — frontend (lexer, parser, type checker, tree-walking interpreter), in rust.
+- **v0.1** — frontend (lexer, parser, type checker, tree-walking interpreter), in rust. *(lexer + parser + interp live; rest in progress)*
 - **v0.2** — LLVM backend, single-file native binaries.
 - **v0.3** — minimal stdlib (io, fs, str, vec, map, iter, time, net, json).
 - **v0.4** — `lingo fmt`, `lingo lsp`, `lingo test`, package manager.
