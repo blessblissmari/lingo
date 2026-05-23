@@ -10,11 +10,11 @@ fn main():
     let words = trimmed.split(" ")
     print("count:", words.len())
 
-    let mut long = vec[]
+    let mut long_words = vec[]
     for w in words:
         if w.len() >= 5:
-            long.push(w)
+            long_words.push(w)
 
-    print("long words:", long)
+    print("long words:", long_words)
     print("contains 'quick'?", words.contains("quick"))
     print("contains 'cat'?", words.contains("cat"))
