@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.24 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, **`T ! E` + `?` + match-on-result**, **f-string interpolation of `struct` / `enum` values**, **`str.trim()` + `vec[T].contains(x)`**, **`print(vec[T])` rendering vec contents**, and **backwards element-type inference for `let mut x = vec[]`** (from a later `x.push(e)`). 35/35 integration tests green.
+> ⚠️ **status:** v0.1.25 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, **`T ! E` + `?` + match-on-result**, **f-string interpolation of `struct` / `enum` values**, **`str.trim()` + `vec[T].contains(x)`**, **`print(vec[T])` rendering vec contents**, **backwards element-type inference for `let mut x = vec[]`**, and **C-keyword-safe local identifiers** (lingo `long`, `register`, etc. survive lowering). 35/35 integration tests green.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
