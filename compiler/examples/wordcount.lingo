@@ -1,0 +1,20 @@
+# word frequency with map[str, int].
+# uses f-strings for readable output.
+
+fn main():
+    let text = "the quick brown fox jumps over the lazy dog the fox is quick"
+    let words = text.split(" ")
+
+    let mut counts = map{}
+    for w in words:
+        let prev = counts.get(w)
+        match prev:
+            none:
+                counts.set(w, 1)
+            _:
+                # `prev` is an int when key existed
+                counts.set(w, prev + 1)
+
+    print(f"unique words: {counts.len()}")
+    for k in counts.keys():
+        print(f"  {k}: {counts.get(k)}")
