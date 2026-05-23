@@ -625,6 +625,29 @@ impl Interp {
                 }
             }
             Stmt::For { var, iter, body, span: _ } => {
+                // v0.1.28: the for-loop variable is a fresh binding — apply the
+                // same no-shadowing rule as `let`.  `_` is the "don't bind" sigil
+                // and is always allowed.  Pre-v0.1.28, `let i = 0; for i in 0..3`
+                // silently shadowed `i` for the duration of the loop, which
+                // disagreed with DECISIONS.md.
+                if var != "_" {
+                    for scope in self.scopes.iter().rev() {
+                        if scope.bindings.contains_key(var) {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("`{}` already in scope (shadowing is forbidden)", var),
+                                iter.span,
+                            ));
+                        }
+                    }
+                    if self.consts.contains_key(var) || self.fns.contains_key(var) {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("`{}` already declared at module scope", var),
+                            iter.span,
+                        ));
+                    }
+                }
                 // `for _ in forever:` — infinite loop. Only `_` is allowed as the
                 // loop variable here; the iterable produces no value.
                 if matches!(iter.kind, ExprKind::Forever) {
@@ -726,7 +749,37 @@ impl Interp {
         match pat {
             Pattern::Wildcard(_) => Ok(true),
             Pattern::Bind(name, span) => {
-                // bind never fails; introduces a binding
+                // bind never fails; introduces a binding.  `_` is handled by
+                // `Pattern::Wildcard` above — anything reaching here has a real
+                // name we must record.
+                //
+                // The topmost scope is the per-arm scope pushed by `Stmt::Match`
+                // before calling `pattern_match`.  Two checks:
+                //   1. v0.1.28: the bind name mustn't shadow an enclosing-scope
+                //      binding, a const, or a fn.  Pre-v0.1.28, a `let x = 1`
+                //      followed by `match Opt.Some(42): Some(x): ...` silently
+                //      shadowed `x` inside the arm, disagreeing with
+                //      DECISIONS.md.
+                //   2. The name mustn't be bound twice in the same pattern
+                //      (`Pair(x, x)`).  Different diagnostic — matches the
+                //      pre-v0.1.28 wording.
+                let scopes_len = self.scopes.len();
+                for scope in self.scopes[..scopes_len.saturating_sub(1)].iter().rev() {
+                    if scope.bindings.contains_key(name) {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("`{}` already in scope (shadowing is forbidden)", name),
+                            *span,
+                        ));
+                    }
+                }
+                if self.consts.contains_key(name) || self.fns.contains_key(name) {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("`{}` already declared at module scope", name),
+                        *span,
+                    ));
+                }
                 let scope = self.scopes.last_mut().unwrap();
                 if scope.bindings.contains_key(name) {
                     return Err(LingoError::new(

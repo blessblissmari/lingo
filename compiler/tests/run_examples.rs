@@ -76,6 +76,86 @@ fn run_with_args(file: &str, prog_args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// v0.1.28: the no-shadowing rule now extends to **for-loop variables**
+/// and **match-arm binds**, in both backends.  Pre-v0.1.28, `let i = 0`
+/// followed by `for i in 0..3:` (or a match arm `Some(x)` against an
+/// outer `let x`) silently shadowed the outer name for the duration of
+/// the loop / arm — disagreeing with DECISIONS.md's "no shadowing" rule.
+#[test]
+fn interp_rejects_for_var_shadow() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_shadow_for_interp.lingo");
+    std::fs::write(&path, "fn main():\n    let i = 0\n    for i in 0..3:\n        print(i)\n").unwrap();
+    let out = std::process::Command::new(bin).arg(&path).output().expect("run lingo");
+    assert!(!out.status.success(), "interp should reject for-var shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`i` already in scope (shadowing is forbidden)"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn interp_rejects_match_bind_shadow() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_shadow_match_interp.lingo");
+    let src = "enum Opt:\n    Some(int)\n    None\n\n\
+               fn main():\n    let x = 1\n    match Opt.Some(42):\n        \
+               Opt.Some(x):\n            print(x)\n        Opt.None:\n            print(0)\n";
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin).arg(&path).output().expect("run lingo");
+    assert!(!out.status.success(), "interp should reject match-bind shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`x` already in scope (shadowing is forbidden)"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn c_backend_rejects_for_var_shadow() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_shadow_for_native.lingo");
+    std::fs::write(&path, "fn main():\n    let i = 0\n    for i in 0..3:\n        print(i)\n").unwrap();
+    let out = std::process::Command::new(bin).arg("build").arg(&path).output().expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject for-var shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`i` already in scope (shadowing is forbidden)"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn c_backend_rejects_match_bind_shadow() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_shadow_match_native.lingo");
+    let src = "enum Opt:\n    Some(int)\n    None\n\n\
+               fn main():\n    let x = 1\n    match Opt.Some(42):\n        \
+               Opt.Some(x):\n            print(x)\n        Opt.None:\n            print(0)\n";
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin).arg("build").arg(&path).output().expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject match-bind shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`x` already in scope (shadowing is forbidden)"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+/// `_` is the "don't bind" sigil and must still be allowed everywhere,
+/// even when an outer scope has a binding called `_` (which itself is
+/// only possible because `_` is treated specially in `let` too).
+#[test]
+fn for_var_underscore_still_allowed() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_shadow_for_under.lingo");
+    std::fs::write(&path, "fn main():\n    let mut n = 0\n    for _ in 0..3:\n        n = n + 1\n    print(n)\n").unwrap();
+    let out = std::process::Command::new(bin).arg(&path).output().expect("run lingo");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "3");
+}
+
 /// v0.1.27: the C backend should reject shadowing with the same
 /// `resolve error:` diagnostic the interpreter uses, instead of letting
 /// `cc` complain about a redeclaration after the fact.  Three flavours

@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.27 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, **`T ! E` + `?` + match-on-result**, **f-string interpolation of `struct` / `enum` values**, **`str.trim()` + `vec[T].contains(x)`**, **`print(vec[T])` rendering vec contents**, **backwards element-type inference for `let mut x = vec[]`**, **C-keyword-safe local identifiers** (lingo `long`, `register`, etc. survive lowering), **`for _ in forever:` infinite loops** (interp + native), and **`let` shadowing diagnostics in the C backend** (parity with the interpreter — no more cryptic cc errors). 39/39 integration tests green.
+> ⚠️ **status:** v0.1.28 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, **`T ! E` + `?` + match-on-result**, **f-string interpolation of `struct` / `enum` values**, **`str.trim()` + `vec[T].contains(x)`**, **`print(vec[T])` rendering vec contents**, **backwards element-type inference for `let mut x = vec[]`**, **C-keyword-safe local identifiers** (lingo `long`, `register`, etc. survive lowering), **`for _ in forever:` infinite loops** (interp + native), **`let` shadowing diagnostics in the C backend**, and **full no-shadow parity across `let` / for-loop var / match-arm bind** in both backends. 48/48 integration tests green.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -136,7 +136,7 @@ fn main():
 9. **traits for behaviour, structs for data.** no inheritance.
 10. **native backend + monomorphized generics** → target: within 10% of zig.
 
-## what works today (v0.1.27)
+## what works today (v0.1.28)
 
 ### interpreter
 
