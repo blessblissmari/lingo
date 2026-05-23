@@ -8,7 +8,8 @@ fast as zig. simple as python. loved by llm agents.
 </div>
 
 > ⚠️ **status:** design phase. no compiler yet — only the spec, examples and a roadmap.
-> if you have opinions about the syntax, open an issue.
+> all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+> disagree? open an issue.
 
 ---
 
@@ -26,8 +27,12 @@ that changes the priorities:
 | hidden control flow          | **all control flow is visible** in the code      |
 | performance via cleverness   | performance via a **predictable cost model**     |
 
-but lingo also has to be *fast*. so the runtime model is closer to zig than to python:
-no GC by default, monomorphized generics, LLVM/QBE backend, zero-cost abstractions.
+the rule we apply when we hesitate: **pick the option that makes the *reader's*
+life easier, even at the cost of the writer's.** an llm agent is a reader 90%
+of the time.
+
+lingo also has to be *fast*. so the runtime model is closer to zig than to
+python: no GC, monomorphized generics, LLVM backend, zero-cost abstractions.
 
 ## the 30‑second pitch
 
@@ -50,58 +55,65 @@ fn main():
 ```
 
 ```lingo
-# errors are values, never exceptions
+# errors are values. one error type per fn. `?` propagates.
+enum ParseError:
+    Empty
+    OutOfRange
+    BadChar(char)
+
 fn parse_port(s: str) -> u16 ! ParseError:
     let n = int.parse(s)?
     if n < 0 or n > 65535:
         return err(ParseError.OutOfRange)
     return n as u16
 
-fn main() ! Error:
-    let port = parse_port(env("PORT") or "8080")?
+fn main(args: [str]) ! ParseError:
+    let port = parse_port(args.get(1).unwrap_or("8080"))?
     print("listening on", port)
 ```
 
-## design principles
+## the 10 rules (full list in [`docs/DECISIONS.md`](docs/DECISIONS.md))
 
-1. **indentation-based, python-shaped** — llms already speak this dialect fluently.
-2. **one way to do it** — one loop (`for x in …`), one error shape (`! E` + `?`), one string type.
-3. **types at boundaries, inferred inside** — `fn` signatures and struct fields are typed; locals use `let`.
-4. **no hidden allocation** — `[]`, `{}`, string concat, etc. are either stack values or require an explicit allocator.
-5. **errors as values** — `!` in the return type, `?` to propagate. no exceptions, no panics for normal flow.
-6. **no implicit conversions** — `i32` and `u16` never auto-cast. you write `as`.
-7. **deterministic compilation** — same code, same machine code. no hidden ordering, no nondeterminism.
-8. **first-class docstrings + intent comments** — every `fn` can carry an `@intent` line the compiler preserves for tooling and llms.
-
-read the full rationale in [`docs/DESIGN.md`](docs/DESIGN.md).
-read the syntax sketch in [`docs/SYNTAX.md`](docs/SYNTAX.md).
-
-## roadmap
-
-see [`ROADMAP.md`](ROADMAP.md). short version:
-
-- **v0.1** — frontend: lexer, parser, type checker. interpreter for tests.
-- **v0.2** — llvm backend, single‑file binaries, no stdlib.
-- **v0.3** — minimal stdlib (io, str, vec, map, fs).
-- **v0.4** — package manager, language server, formatter.
-- **v1.0** — self‑hosted compiler.
+1. **indentation-based, python-shaped** — llms already speak it fluently.
+2. **one loop, one error shape, one string interpolation, one comment shape.**
+3. **types at signatures, inferred inside** — `fn` boundaries always typed.
+4. **errors are values:** `T ! E` with `?` to propagate. no exceptions, ever.
+5. **explicit allocators:** any fn that may allocate takes `alloc: &Allocator`.
+6. **no implicit conversions, no truthiness, no shadowing, no default args.**
+7. **keyword args required when a fn has >2 parameters.**
+8. **structured concurrency only** — `nursery`, no `async fn`, no goroutines.
+9. **traits for behaviour, structs for data.** no inheritance.
+10. **LLVM backend + monomorphized generics** → target: within 10% of zig.
 
 ## examples
 
 - [`examples/hello.lingo`](examples/hello.lingo) — hello world
 - [`examples/fib.lingo`](examples/fib.lingo) — recursion + loops
 - [`examples/wordcount.lingo`](examples/wordcount.lingo) — file io, hashmap, errors
-- [`examples/http.lingo`](examples/http.lingo) — a tiny http server sketch
+- [`examples/http.lingo`](examples/http.lingo) — a tiny http server, structured concurrency
+
+## docs
+
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — every committed rule, in one place
+- [`docs/DESIGN.md`](docs/DESIGN.md) — *why* the rules look this way
+- [`docs/SYNTAX.md`](docs/SYNTAX.md) — full syntax reference (v0.1)
+- [`docs/GRAMMAR.bnf`](docs/GRAMMAR.bnf) — formal grammar sketch
+- [`ROADMAP.md`](ROADMAP.md) — what gets built, in what order
+
+## roadmap (short)
+
+- **v0.1** — frontend (lexer, parser, type checker, tree-walking interpreter), in rust.
+- **v0.2** — LLVM backend, single-file native binaries.
+- **v0.3** — minimal stdlib (io, fs, str, vec, map, iter, time, net, json).
+- **v0.4** — `lingo fmt`, `lingo lsp`, `lingo test`, package manager.
+- **v1.0** — self-hosted compiler.
 
 ## non‑goals
 
-- object inheritance (we have structs + traits, that's it)
-- macros that rewrite syntax (we have `comptime`, like zig)
-- a giant batteries‑included stdlib (small core, good package manager)
-- being a php or a ruby — we don't want 14 ways to write a `for` loop
+- object inheritance, exceptions, null, implicit conversions, function colors.
+- macros that rewrite syntax (the compiler handles generics; no user `comptime` in v0.1).
+- a giant batteries‑included stdlib — small core, good package manager.
+- being a php or a ruby — we don't want 14 ways to write a `for` loop.
 
-## status
-
-🚧 nothing is real yet. this repo is the *spec*. the compiler is next.
-
-prs and issues welcome — especially on the syntax. the worst time to change a language is *after* people write code in it.
+prs and issues welcome — especially on syntax. the worst time to change a
+language is *after* people write code in it.
