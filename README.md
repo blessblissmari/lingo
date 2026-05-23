@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.16 — bootstrap interpreter, **working C backend**, and **interactive REPL**. 25/25 integration tests green.
+> ⚠️ **status:** v0.1.17 — bootstrap interpreter, **working C backend**, **interactive REPL**, and **owning vec + push/pop/set in native**. 26/26 integration tests green.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -160,7 +160,7 @@ shells out to `cc` to produce a native binary. supported today:
 - `fn`, control flow, recursion
 - structs with fields + methods (static and instance), auto-debug `print(point)`
 - enums with payloads + `match` + auto-debug `print(shape)`
-- `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `for`-iteration
+- `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `.push`, `.pop`, `.set`, `for`-iteration (owning, heap-backed)
 - `map[str, i64]` empty literals + `.len`, `.has`, `.get`, `.set`, `.keys`
 - string ops: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.split`
 - f-strings (allocated via 2-pass `vsnprintf`)
@@ -188,6 +188,7 @@ native-capable:
 [`vec_native`](compiler/examples/vec_native.lingo) ·
 [`strings_native`](compiler/examples/strings_native.lingo) ·
 [`vec_strings_native`](compiler/examples/vec_strings_native.lingo) ·
+[`vec_push_native`](compiler/examples/vec_push_native.lingo) ·
 [`wordcount_native`](compiler/examples/wordcount_native.lingo) ·
 [`shapes`](compiler/examples/shapes.lingo)
 
