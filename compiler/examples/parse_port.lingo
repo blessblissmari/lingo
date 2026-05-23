@@ -1,0 +1,61 @@
+# fallible functions: `T ! E`, `raise`, and `?` for propagation.
+# this is the canonical example from lingo's README.
+
+enum ParseError:
+    Empty
+    NotANumber
+    OutOfRange(int)
+
+fn parse_int(s: str) -> int ! ParseError:
+    if s.len() == 0:
+        raise ParseError.Empty
+    let mut acc = 0
+    for ch in s:
+        if ch == "0":
+            acc = acc * 10
+        elif ch == "1":
+            acc = acc * 10 + 1
+        elif ch == "2":
+            acc = acc * 10 + 2
+        elif ch == "3":
+            acc = acc * 10 + 3
+        elif ch == "4":
+            acc = acc * 10 + 4
+        elif ch == "5":
+            acc = acc * 10 + 5
+        elif ch == "6":
+            acc = acc * 10 + 6
+        elif ch == "7":
+            acc = acc * 10 + 7
+        elif ch == "8":
+            acc = acc * 10 + 8
+        elif ch == "9":
+            acc = acc * 10 + 9
+        else:
+            raise ParseError.NotANumber
+    return acc
+
+fn parse_port(s: str) -> int ! ParseError:
+    let n = parse_int(s)?
+    if n < 1 or n > 65535:
+        raise ParseError.OutOfRange(n)
+    return n
+
+fn describe(s: str) -> str:
+    match parse_port(s):
+        ok(p):
+            return "ok: " + s + " -> port"
+        err(ParseError.Empty):
+            return "err: empty"
+        err(ParseError.NotANumber):
+            return "err: not a number"
+        err(ParseError.OutOfRange(_)):
+            return "err: out of range"
+        _:
+            return "err: unknown"
+
+fn main():
+    print(describe("8080"))
+    print(describe(""))
+    print(describe("abc"))
+    print(describe("99999"))
