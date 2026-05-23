@@ -211,6 +211,14 @@ fn c_backend_math_native_matches_interp() {
 }
 
 #[test]
+fn c_backend_struct_methods_match_interp() {
+    let Some((native_out, stderr, code)) = run_native("point_int.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("point_int.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+#[test]
 fn io_roundtrip() {
     let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
     assert_eq!(code, 0, "stderr: {stderr}");
