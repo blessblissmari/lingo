@@ -1,20 +1,24 @@
 # word frequency with map[str, int].
 # uses f-strings for readable output.
+#
+# v0.2.1: `map.get(k)` returns `Opt[V]`.  Discriminate with
+# `some(v) / none` — `_` no longer binds the inner value (because
+# `_` on an Opt doesn't unwrap), and `prev + 1` on a raw Opt is
+# now a type error in both backends.
 
 fn main():
     let text = "the quick brown fox jumps over the lazy dog the fox is quick"
     let words = text.split(" ")
 
-    let mut counts = map{}
+    let mut counts: map[str, i64] = map{}
     for w in words:
-        let prev = counts.get(w)
-        match prev:
-            none:
-                counts.set(w, 1)
-            _:
-                # `prev` is an int when key existed
-                counts.set(w, prev + 1)
+        match counts.get(w):
+            none:    counts.set(w, 1)
+            some(n): counts.set(w, n + 1)
 
     print(f"unique words: {counts.len()}")
     for k in counts.keys():
+        # `counts.get(k)` returns Opt[i64]; f-string interp shows
+        # the inner value (or `none` if absent — can't happen here
+        # since we just iterated the keys).
         print(f"  {k}: {counts.get(k)}")

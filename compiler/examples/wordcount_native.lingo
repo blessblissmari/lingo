@@ -1,6 +1,8 @@
 # word frequency with map[str, i64] — the C backend version.
-# v0.1.15: empty `map{}` literals only; build via .set(); has()-check
-# before get() if you need to distinguish "missing" from "value 0".
+#
+# v0.2.1: `map.get(k)` now returns `Opt[V]`, so the canonical idiom is
+# a `match` on the Opt rather than the v0.1.x `has`/`get` pair.  This
+# example demonstrates the new pattern in native code.
 
 fn main():
     let text = "the quick brown fox jumps over the lazy dog the fox is quick"
@@ -8,11 +10,12 @@ fn main():
 
     let mut counts: map[str, i64] = map{}
     for w in words:
-        if counts.has(w):
-            counts.set(w, counts.get(w) + 1)
-        else:
-            counts.set(w, 1)
+        match counts.get(w):
+            some(n): counts.set(w, n + 1)
+            none:    counts.set(w, 1)
 
     print(f"unique: {counts.len()}")
     for k in counts.keys():
-        print(f"{k}: {counts.get(k)}")
+        match counts.get(k):
+            some(n): print(f"{k}: {n}")
+            none:    print(f"{k}: 0")  # unreachable: we just iterated keys()

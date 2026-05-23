@@ -55,12 +55,13 @@ fn main():
 
     print(greet(name: "артём", hour: 11, mood: "dangerous"))
 
-    # map: word frequency
-    let mut counts = map{}
+    # map: word frequency (v0.2.1: `map.get` returns `Opt[V]`,
+    # so we bind the inner value with `some(n)` instead of `_`).
+    let mut counts: map[str, i64] = map{}
     for w in "the fox the lazy dog the fox".split(" "):
         match counts.get(w):
-            none: counts.set(w, 1)
-            _:    counts.set(w, counts.get(w) + 1)
+            none:    counts.set(w, 1)
+            some(n): counts.set(w, n + 1)
     print(f"unique words: {counts.len()}")
 
     # error handling

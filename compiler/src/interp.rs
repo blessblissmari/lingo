@@ -49,6 +49,14 @@ pub enum Value {
         variant: String,
         payload: Vec<Value>,
     },
+    /// v0.2.1: typed optional value, returned by builtins that may
+    /// produce *no* value (today: `map.get(k)` only).  `Opt(None)` matches
+    /// the `none` pattern; `Opt(Some(v))` matches `some(x)` (binding x).
+    /// Display: `none` for absent, the inner value's display for present —
+    /// so `print(counts.get(k))` keeps the v0.1.x wire format.
+    /// Distinct from `None_` (which is the "no return value" sentinel used
+    /// internally — those continue to display as `none` too).
+    Opt(Option<Box<Value>>),
     None_,
 }
 
@@ -65,6 +73,7 @@ impl Value {
             Value::Result_(_) => "result".into(),
             Value::Struct { type_name, .. } => type_name.clone(),
             Value::Enum { type_name, .. } => type_name.clone(),
+            Value::Opt(_) => "opt".into(),
             Value::None_ => "none".into(),
         }
     }
@@ -108,6 +117,13 @@ impl Value {
                     format!("{type_name}.{variant}({})", parts.join(", "))
                 }
             }
+            // v0.2.1: Opt's display matches the v0.1.x wire format —
+            // `none` for absent, the inner value's display for present.
+            // So `print(counts.get(k))` reads identically across versions
+            // and across backends.  `Some(v)` / `None` wrapper text is
+            // *never* part of the display (use `match` to discriminate).
+            Value::Opt(None) => "none".into(),
+            Value::Opt(Some(v)) => v.display(),
             Value::None_ => "none".into(),
         }
     }
@@ -864,6 +880,28 @@ impl Interp {
                         }
                     }
                     Value::None_ => Ok(type_name.is_none() && variant == "none" && sub.is_empty()),
+                    Value::Opt(opt) => {
+                        // v0.2.1: `none` and `some(...)` patterns on Opt[T].
+                        // Bare-variant only (no `Opt.Some` / `Opt.None`
+                        // namespacing today).
+                        if type_name.is_some() {
+                            return Ok(false);
+                        }
+                        match (variant.as_str(), opt) {
+                            ("none", None) => Ok(sub.is_empty()),
+                            ("some", Some(inner)) => {
+                                if sub.len() != 1 {
+                                    return Err(LingoError::new(
+                                        Stage::Runtime,
+                                        format!("`some(...)` pattern needs exactly 1 field, got {}", sub.len()),
+                                        *span,
+                                    ));
+                                }
+                                self.pattern_match(&sub[0], inner)
+                            }
+                            _ => Ok(false),
+                        }
+                    }
                     Value::Bool(b) => {
                         // allow `true`/`false` to also be matched as bare variants
                         if type_name.is_none()
@@ -1600,14 +1638,20 @@ impl Interp {
                         Ok(Some(Value::Bool(found)))
                     }
                     ("get", 1) => {
+                        // v0.2.1: `map.get(k)` now returns `Opt[V]` instead
+                        // of the duck-typed "raw V or None_" of v0.1.x.
+                        // Pattern-match with `some(v) / none` to discriminate;
+                        // `print(counts.get(k))` keeps the same wire format
+                        // because Opt's display equals the inner value's
+                        // display (or "none" for absent).
                         let key = &vals[0];
                         let borrow = rc.borrow();
                         for (k, v) in borrow.iter() {
                             if values_eq(k, key) {
-                                return Ok(Some(v.clone()));
+                                return Ok(Some(Value::Opt(Some(Box::new(v.clone())))));
                             }
                         }
-                        Ok(Some(Value::None_))
+                        Ok(Some(Value::Opt(None)))
                     }
                     ("set", 2) => {
                         let mut it = vals.into_iter();
