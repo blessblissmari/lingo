@@ -33,6 +33,7 @@
 - [x] **C backend structs + methods** (v0.1.8): `struct` decls lower to C structs; `impl Type:` static and instance methods lower to `Type_method`; `Pt{x: 1, y: 2}` lowers to a C99 designated initializer.
 - [x] **C backend enums + match** (v0.1.9): each `enum T` becomes `T_Tag` + `struct T { tag; union { ... } as; }`; variant constructors lower to designated initializers; `match` becomes `switch (x.tag)` with payload subpatterns binding to `x.as.Variant._0/_1/...`.
 - [x] **C backend f64 floats** (v0.1.10): `f64` lowers to `double`; float literals always emit a decimal point; arithmetic upcasts when either side is f64; `x ** y` on f64 lowers to `pow(x, y)` (libm linked with `-lm`); `%` on floats is a compile-time error.
+- [x] **C backend debug print + keyword args** (v0.1.11): `print(value)` auto-generates a `Type{field: value, ...}` format for structs and a `Type.Variant(payload, ...)` format for enums (matches Rust's `{:?}` intent). Keyword args resolved positionally in calls (`f(name: 1, value: 2)`), with duplicate/unknown/missing-arg checks.
 - [ ] auto-wrap `?` via a `From<E>` trait (needs generic trait params first)
 - [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
