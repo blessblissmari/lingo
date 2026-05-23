@@ -7,8 +7,8 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.7 — bootstrap interpreter + a *working C backend*. 15/15 integration tests green.
-> structs / enums / match / vec / map / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a subset compiles to native via the C backend (≈2300× faster on `fib(35)`).
+> ⚠️ **status:** v0.1.16 — bootstrap interpreter, **working C backend**, and **interactive REPL**. 25/25 integration tests green.
+> structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
 
@@ -22,23 +22,32 @@ cd lingo/compiler
 cargo run --release -- examples/hello.lingo
 # hello, lingo
 
-cargo run --release -- ../examples/fib.lingo
+cargo run --release -- examples/fib.lingo
 # 0 1 1 2 3 5 8 13 21 34   (one per line)
 
 cargo test
-# 15 passed; 0 failed
+# 25 passed; 0 failed
 
 # compile to a native binary via the C backend:
 cargo run --release -- build examples/fib.lingo
 ./fib
 # 0 1 1 2 3 5 8 13 21 34
 
-# guided tour of every v0.1.5 feature:
-cargo run --release -- examples/tour.lingo
+# interactive REPL (NEW in v0.1.16):
+cargo run --release -- repl
+# >>> let x = 21
+# >>> print(x + x)
+# 42
+# >>> fn double(n: i64) -> i64:
+# ...     return n * 2
+# ...
+# >>> print(double(7))
+# 14
 ```
 
 requires rust 1.75+ (`rustup` will get you there).
 no other dependencies — the bootstrap compiler is zero-dep rust.
+the C backend shells out to `cc` (gcc/clang); no LLVM yet.
 
 ## why another language?
 
@@ -59,7 +68,7 @@ life easier, even at the cost of the writer's.** an llm agent is a reader 90%
 of the time.
 
 lingo also has to be *fast*. so the runtime model is closer to zig than to
-python: no GC, monomorphized generics, LLVM backend, zero-cost abstractions.
+python: no GC, monomorphized generics, native backend, zero-cost abstractions.
 
 ## the 30‑second pitch
 
@@ -99,43 +108,96 @@ fn main(args: [str]) ! ParseError:
     print("listening on", port)
 ```
 
+```lingo
+# wordcount_native.lingo — compiles to native via the C backend.
+fn main():
+    let text = "the quick brown fox jumps over the lazy dog the fox is quick"
+    let mut counts: map[str, i64] = map{}
+    for w in text.split(" "):
+        if counts.has(w):
+            counts.set(w, counts.get(w) + 1)
+        else:
+            counts.set(w, 1)
+    print(f"unique: {counts.len()}")
+    for k in counts.keys():
+        print(f"{k}: {counts.get(k)}")
+```
+
 ## the 10 rules (full list in [`docs/DECISIONS.md`](docs/DECISIONS.md))
 
 1. **indentation-based, python-shaped** — llms already speak it fluently.
 2. **one loop, one error shape, one string interpolation, one comment shape.**
 3. **types at signatures, inferred inside** — `fn` boundaries always typed.
 4. **errors are values:** `T ! E` with `?` to propagate. no exceptions, ever.
-5. **explicit allocators:** any fn that may allocate takes `alloc: &Allocator`.
+5. **explicit allocators:** any fn that may allocate takes `alloc: &Allocator`. *(allocator API lands in v0.1.x; until then the C backend leaks.)*
 6. **no implicit conversions, no truthiness, no shadowing, no default args.**
 7. **keyword args required when a fn has >2 parameters.**
 8. **structured concurrency only** — `nursery`, no `async fn`, no goroutines.
 9. **traits for behaviour, structs for data.** no inheritance.
-10. **LLVM backend + monomorphized generics** → target: within 10% of zig.
+10. **native backend + monomorphized generics** → target: within 10% of zig.
 
-## what works today
+## what works today (v0.1.16)
 
-the v0.1.0 compiler (in [`compiler/`](compiler/)) understands:
+### interpreter
 
-- `fn` declarations with typed parameters and return type
-- `let` / `let mut` (shadowing is a compile error)
-- `if` / `elif` / `else`
-- `for i in 0..N:` (range loops)
-- `return`, `break`, `continue`
+- `fn` / `let` / `let mut` (no shadowing)
+- `if` / `elif` / `else`, `for x in iter:` (ranges and collections), `return` / `break` / `continue`
 - arithmetic, comparison, boolean ops, `**`, `%`
-- function calls with positional and keyword arguments
-  (keyword args **required** when a fn has >2 params)
-- `print(...)`, ints, floats, strings, bools
+- structs + methods, enums + `match`, traits + `impl T for U` (incl. default methods)
+- `vec[T]` literals, `map[K, V]` literals + methods (`.len`, `.has`, `.get`, `.set`, `.keys`, `.values`, `.contains`, `.remove`, `.clear`)
+- string runtime: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.to_upper`, `.to_lower`, `.trim`, `.split`, `.replace`
+- f-strings: `f"x={x}, y={point.x + 1}"`
+- error types: `T ! E`, `?` propagation, `raise`, `ok(v)` / `err(e)`
+- io builtins for files/argv
+- positional + keyword args (kwargs required when a fn has >2 params)
 
-what's coming in v0.1.x: structs, enums, traits, generics, error types,
-`?` propagation, explicit allocators, f-strings, `match`, the stdlib.
-see [`ROADMAP.md`](ROADMAP.md).
+### C backend (native)
 
-## examples
+compiles a subset of the above to a single self-contained C file, then
+shells out to `cc` to produce a native binary. supported today:
 
-- [`examples/hello.lingo`](examples/hello.lingo) — hello world ✅ runs
-- [`examples/fib.lingo`](examples/fib.lingo) — recursion + loops ✅ runs
-- [`examples/wordcount.lingo`](examples/wordcount.lingo) — file io, hashmap, errors (preview — needs v0.2)
-- [`examples/http.lingo`](examples/http.lingo) — tiny http server, structured concurrency (preview — needs v0.2)
+- ints (i64/u64), floats (f64), bools, strings (byte-counted, ASCII-safe)
+- `fn`, control flow, recursion
+- structs with fields + methods (static and instance), auto-debug `print(point)`
+- enums with payloads + `match` + auto-debug `print(shape)`
+- `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `for`-iteration
+- `map[str, i64]` empty literals + `.len`, `.has`, `.get`, `.set`, `.keys`
+- string ops: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.split`
+- f-strings (allocated via 2-pass `vsnprintf`)
+- positional + keyword args, default-aware static dispatch
+
+### REPL (NEW in v0.1.16)
+
+- `lingo repl` drops you into an interactive session
+- persistent root scope: `let` bindings survive across prompts
+- `fn` / `struct` / `enum` / `impl` / `trait` / `const` declarations accumulate (and can be **redefined** — REPL convenience overrides the "no duplicates" rule)
+- multi-line entries end on a blank line
+- `:help`, `:clear`, `:quit` meta commands; Ctrl-D also quits
+
+### examples
+
+native-capable:
+[`hello`](compiler/examples/hello.lingo) ·
+[`fib`](compiler/examples/fib.lingo) ·
+[`math`](compiler/examples/math.lingo) ·
+[`point`](compiler/examples/point.lingo) ·
+[`point_int`](compiler/examples/point_int.lingo) ·
+[`enums_native`](compiler/examples/enums_native.lingo) ·
+[`floats_native`](compiler/examples/floats_native.lingo) ·
+[`debug_print`](compiler/examples/debug_print.lingo) ·
+[`vec_native`](compiler/examples/vec_native.lingo) ·
+[`strings_native`](compiler/examples/strings_native.lingo) ·
+[`vec_strings_native`](compiler/examples/vec_strings_native.lingo) ·
+[`wordcount_native`](compiler/examples/wordcount_native.lingo) ·
+[`shapes`](compiler/examples/shapes.lingo)
+
+interp-only (waiting on `?`/`!E` lowering, trait vtables, or `T!E` lowering):
+[`words`](compiler/examples/words.lingo) ·
+[`tour`](compiler/examples/tour.lingo) ·
+[`parse_port`](compiler/examples/parse_port.lingo) ·
+[`io_roundtrip`](compiler/examples/io_roundtrip.lingo) ·
+[`traits`](compiler/examples/traits.lingo) ·
+[`greet`](compiler/examples/greet.lingo)
 
 ## docs
 
@@ -148,9 +210,9 @@ see [`ROADMAP.md`](ROADMAP.md).
 
 ## roadmap (short)
 
-- **v0.1** — frontend (lexer, parser, type checker, tree-walking interpreter), in rust. *(lexer + parser + interp live; rest in progress)*
-- **v0.2** — LLVM backend, single-file native binaries.
-- **v0.3** — minimal stdlib (io, fs, str, vec, map, iter, time, net, json).
+- **v0.1.x** — bootstrap frontend (lexer, parser, tree-walking interp) + C backend MVP + REPL. *(we are here)*
+- **v0.2** — LLVM backend, allocators + `defer`, generics via monomorphization, single-file native binaries.
+- **v0.3** — minimal stdlib (io, fs, str, vec, map, iter, time, net, json) — written in lingo.
 - **v0.4** — `lingo fmt`, `lingo lsp`, `lingo test`, package manager.
 - **v1.0** — self-hosted compiler.
 
