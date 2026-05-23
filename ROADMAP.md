@@ -10,20 +10,23 @@
 - [x] committed decisions (`docs/DECISIONS.md`)
 - [x] grammar sketch (`docs/GRAMMAR.bnf`)
 
-**exit:** the rules are written down. when you hesitate while implementing,
-you re-read `DECISIONS.md`, not "open questions".
+## phase 1 — frontend (v0.1) — in rust  🟡 in progress
 
-## phase 1 — frontend (v0.1) — in rust
-
-- [ ] lexer (hand-written, INDENT/DEDENT, raises on mixed tabs+spaces)
-- [ ] parser → ast (recursive descent, generates source spans)
+- [x] **lexer** (hand-written, INDENT/DEDENT, rejects tabs) — `compiler/src/lexer.rs`
+- [x] **parser → ast** (recursive descent, source spans) — `compiler/src/parser.rs`
+- [x] **tree-walking interpreter** (no codegen yet) — `compiler/src/interp.rs`
+- [x] **cli** — `lingo path/to/file.lingo`, `--tokens`, `--ast`
+- [x] hello world + fib + math examples passing as integration tests
 - [ ] desugaring pass:
   - `?` → match
   - `f"..."` → `string.concat([...])` calls
-  - `for x in iter:` → iterator protocol
-- [ ] name resolution + scope analysis (catches shadowing, undefined names)
+  - `for x in iter:` → iterator protocol (currently `for x in a..b` only)
+- [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
-- [ ] tree-walking interpreter (for tests; no codegen yet)
+- [ ] structs / enums / traits / impl
+- [ ] error types (`! E`) and `?` propagation
+- [ ] generics (monomorphized)
+- [ ] explicit allocators + `defer`
 - [ ] 500-program test suite, mostly hand-written, partly llm-generated
 
 **exit:** the interpreter runs every `examples/*.lingo` correctly.
@@ -87,15 +90,3 @@ to one bootstrapped from rust.
 - a web playground (we'll do one anyway because it's fun)
 - jit / repl
 - user-facing `comptime`
-
-## first-weekend plan
-
-if you have one weekend:
-
-1. lock the grammar (it's in `docs/GRAMMAR.bnf` — iterate on it).
-2. write the lexer in rust. just lex `examples/hello.lingo` and print tokens.
-3. write a parser that produces an ast for the same file.
-4. write a tree-walker that prints `"hello, lingo"`.
-5. celebrate. next weekend, do `fib.lingo`.
-
-incremental wins beat a one-year stealth compiler every time.
