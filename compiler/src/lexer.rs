@@ -46,6 +46,7 @@ pub enum Tok {
     Impl,
     Match,
     Self_,
+    Raise,
     Print, // builtin name, treated like an identifier but reserved
 
     // punctuation / operators
@@ -73,6 +74,8 @@ pub enum Tok {
     Le,
     Gt,
     Ge,
+    Bang,     // !
+    Question, // ?
 
     // layout
     Newline,
@@ -307,6 +310,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LingoError> {
                 "impl" => Tok::Impl,
                 "match" => Tok::Match,
                 "self" => Tok::Self_,
+                "raise" => Tok::Raise,
                 "print" => Tok::Print,
                 other => Tok::Ident(other.to_string()),
             };
@@ -386,6 +390,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LingoError> {
                 b'%' => (Tok::Percent, 1),
                 b'<' => (Tok::Lt, 1),
                 b'>' => (Tok::Gt, 1),
+                b'!' => (Tok::Bang, 1),
+                b'?' => (Tok::Question, 1),
                 c => {
                     return Err(LingoError::new(
                         Stage::Lex,
