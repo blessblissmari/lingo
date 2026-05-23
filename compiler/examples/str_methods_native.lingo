@@ -1,0 +1,15 @@
+# v0.1.23: str.trim() + vec[T].contains(x) in native.
+
+fn main():
+    let line = "  hello, world  "
+    let trimmed = line.trim()
+    print("trimmed:", trimmed)
+    print("upper:", trimmed.to_upper())
+
+    let nums = vec[10, 20, 30]
+    print("has 20?", nums.contains(20))
+    print("has 99?", nums.contains(99))
+
+    let names = vec["ada", "alan", "grace"]
+    print("has alan?", names.contains("alan"))
+    print("has dijkstra?", names.contains("dijkstra"))
