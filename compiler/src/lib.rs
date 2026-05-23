@@ -12,6 +12,7 @@
 //! see ROADMAP.md and docs/DECISIONS.md in the repo root.
 
 pub mod ast;
+pub mod codegen_c;
 pub mod error;
 pub mod interp;
 pub mod lexer;
@@ -32,4 +33,12 @@ pub fn run_with_argv(source: &str, filename: &str, argv: Vec<String>) -> Result<
     let mut interp = interp::Interp::new().with_argv(argv);
     interp.run_program(&program).map_err(|e| e.render(source, filename))?;
     Ok(())
+}
+
+/// Lower a lingo program to a self-contained C source string.
+/// (Subset of the language only — see `src/codegen_c.rs`.)
+pub fn emit_c(source: &str, filename: &str) -> Result<String, String> {
+    let tokens = lexer::lex(source).map_err(|e| e.render(source, filename))?;
+    let program = parser::parse(tokens).map_err(|e| e.render(source, filename))?;
+    codegen_c::emit(&program).map_err(|e| e.render(source, filename))
 }
