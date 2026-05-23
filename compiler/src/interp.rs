@@ -129,6 +129,11 @@ pub struct Interp {
     structs: HashMap<String, StructDecl>,
     enums: HashMap<String, EnumDecl>,
     methods: HashMap<String, HashMap<String, FnDecl>>, // type -> method -> fn
+    /// trait declarations by name.
+    traits: HashMap<String, TraitDecl>,
+    /// `type -> trait -> method -> fn` table.
+    /// Looked up during method dispatch when no inherent method matches.
+    trait_impls: HashMap<String, HashMap<String, HashMap<String, FnDecl>>>,
     scopes: Vec<Scope>,
     /// Set by `?` when the inner result is Err. The next statement boundary
     /// converts this into a `Flow::Raise(...)` so it propagates to the caller.
@@ -154,6 +159,8 @@ impl Interp {
             structs: HashMap::new(),
             enums: HashMap::new(),
             methods: HashMap::new(),
+            traits: HashMap::new(),
+            trait_impls: HashMap::new(),
             scopes: Vec::new(),
             pending_raise: None,
             argv: Vec::new(),
@@ -198,7 +205,17 @@ impl Interp {
                         ));
                     }
                 }
-                Item::Impl(_) | Item::Const(_) => {}
+                Item::Trait(t) => {
+                    if self.traits.contains_key(&t.name) {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("duplicate trait `{}`", t.name),
+                            t.span,
+                        ));
+                    }
+                    self.traits.insert(t.name.clone(), t.clone());
+                }
+                Item::Impl(_) | Item::Const(_) | Item::ImplTrait(_) => {}
             }
         }
         // second pass: register impl methods and evaluate consts
@@ -230,6 +247,76 @@ impl Interp {
                             Stage::Resolve,
                             format!("duplicate const `{}`", c.name),
                             c.span,
+                        ));
+                    }
+                }
+                Item::ImplTrait(b) => {
+                    // The trait must exist.
+                    let trait_decl = self.traits.get(&b.trait_name).cloned().ok_or_else(|| {
+                        LingoError::new(
+                            Stage::Resolve,
+                            format!("`impl {} for {}` refers to unknown trait `{}`",
+                                    b.trait_name, b.target, b.trait_name),
+                            b.span,
+                        )
+                    })?;
+                    // The target type must exist (struct or enum).
+                    if !self.structs.contains_key(&b.target) && !self.enums.contains_key(&b.target) {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("`impl {} for {}` refers to unknown type `{}`",
+                                    b.trait_name, b.target, b.target),
+                            b.span,
+                        ));
+                    }
+                    // Check conformance: every required trait method must be implemented
+                    // (or have a default in the trait). Impl methods must be declared on the trait.
+                    let mut impl_by_name: HashMap<String, FnDecl> = HashMap::new();
+                    for m in &b.methods {
+                        if impl_by_name.insert(m.name.clone(), m.clone()).is_some() {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("duplicate method `{}.{}` in impl {} for {}",
+                                        b.trait_name, m.name, b.trait_name, b.target),
+                                m.span,
+                            ));
+                        }
+                    }
+                    // every impl method must be declared on the trait
+                    for (mname, mdecl) in &impl_by_name {
+                        if !trait_decl.methods.iter().any(|tm| &tm.decl.name == mname) {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("method `{}` is not part of trait `{}`",
+                                        mname, b.trait_name),
+                                mdecl.span,
+                            ));
+                        }
+                    }
+                    // every required (no-default) trait method must be implemented
+                    let mut resolved: HashMap<String, FnDecl> = HashMap::new();
+                    for tm in &trait_decl.methods {
+                        if let Some(m) = impl_by_name.get(&tm.decl.name) {
+                            resolved.insert(tm.decl.name.clone(), m.clone());
+                        } else if tm.has_default {
+                            resolved.insert(tm.decl.name.clone(), tm.decl.clone());
+                        } else {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("`impl {} for {}` missing required method `{}`",
+                                        b.trait_name, b.target, tm.decl.name),
+                                b.span,
+                            ));
+                        }
+                    }
+                    let entry = self.trait_impls
+                        .entry(b.target.clone())
+                        .or_default();
+                    if entry.insert(b.trait_name.clone(), resolved).is_some() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("duplicate `impl {} for {}`", b.trait_name, b.target),
+                            b.span,
                         ));
                     }
                 }
@@ -1012,18 +1099,43 @@ impl Interp {
                     ))
                 }
             };
-            let decl = self
-                .methods
-                .get(&type_name)
-                .and_then(|m| m.get(vname))
-                .cloned()
-                .ok_or_else(|| {
-                    LingoError::new(
+            // method resolution order:
+            //   1. inherent `impl <Type>:` methods
+            //   2. any `impl <Trait> for <Type>:` that defines this method
+            //      (if multiple traits implement a method with the same name,
+            //      we report an ambiguity error rather than silently picking one)
+            let decl = if let Some(d) = self.methods.get(&type_name).and_then(|m| m.get(vname)).cloned() {
+                d
+            } else {
+                let trait_table = self.trait_impls.get(&type_name);
+                let matches: Vec<(String, FnDecl)> = trait_table
+                    .map(|tt| {
+                        tt.iter()
+                            .filter_map(|(tname, ms)| ms.get(vname).map(|m| (tname.clone(), m.clone())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match matches.len() {
+                    0 => return Err(LingoError::new(
                         Stage::Runtime,
                         format!("no method `{}` on `{}`", vname, type_name),
                         callee.span,
-                    )
-                })?;
+                    )),
+                    1 => matches.into_iter().next().unwrap().1,
+                    _ => {
+                        let trait_names: Vec<String> = matches.iter().map(|(t, _)| t.clone()).collect();
+                        return Err(LingoError::new(
+                            Stage::Runtime,
+                            format!(
+                                "ambiguous method `{}.{}` — implemented by traits: {}. \
+                                 use `<Trait>.{}(x, ...)` to disambiguate (not yet supported in v0.1.6)",
+                                type_name, vname, trait_names.join(", "), vname
+                            ),
+                            callee.span,
+                        ));
+                    }
+                }
+            };
             // method must take self as first param
             if decl.params.first().map(|p| p.name.as_str()) != Some("self") {
                 return Err(LingoError::new(
