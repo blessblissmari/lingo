@@ -1,0 +1,19 @@
+# v0.1.22: f-string interpolation of enum + struct values in native.
+
+struct Point:
+    x: int
+    y: int
+
+enum Shape:
+    Circle(int)
+    Square(int)
+    Rect(int, int)
+
+fn main():
+    let p = Point{x: 3, y: 4}
+    print(f"point = {p}")
+
+    let a = Shape.Circle(7)
+    let b = Shape.Square(2)
+    let c = Shape.Rect(3, 4)
+    print(f"shapes: {a} | {b} | {c}")
