@@ -1,202 +1,180 @@
 # lingo — design rationale
 
-this document explains *why* lingo looks the way it does. the target audience is
-people who already know rust, zig, go, or python and want to argue.
+this document explains *why* lingo looks the way it does.
+the *what* (the rules) lives in [`DECISIONS.md`](DECISIONS.md). this doc
+explains the reasoning behind them.
+
+audience: people who already know rust, zig, go, or python and want to argue.
 
 ## the three constraints
 
 lingo has to satisfy three constraints **simultaneously**:
 
-1. **fast** — comparable to zig/rust. AOT, no GC by default, native binaries.
+1. **fast** — comparable to zig/rust. AOT, no GC, native binaries.
 2. **simple** — readable by a beginner, smaller than python.
-3. **llm-friendly** — an agent should be able to write correct lingo at a
-   higher success rate than it writes correct rust.
+3. **llm-friendly** — an agent should write correct lingo at a higher success
+   rate than it writes correct rust.
 
-most languages pick two. lingo's bet is that you can pick all three if you give
-up "expressiveness flex" — multiple ways to do the same thing.
+most languages pick two. lingo's bet is that you can pick all three if you
+give up "expressiveness flex" — multiple ways to do the same thing — and
+accept that the *writer* sometimes types more so the *reader* always has
+less to infer.
 
 ## what "llm-friendly" actually means
 
-it does **not** mean "verbose" or "english-like". llms are excellent at python
-already, which is neither verbose nor english. it means:
+it does **not** mean "verbose" or "english-like". llms are excellent at
+python already. it means:
 
 ### 1. low syntactic ambiguity
 
-llms predict the next token. if there are five ways to write a `for` loop, the
-model has to spread probability mass across them, and is more likely to mix
-them up. lingo has *one* loop shape:
+llms predict the next token. if there are five ways to write a `for` loop,
+the model spreads probability mass across all five and mixes them up. lingo
+has *one* shape per concept:
 
-```lingo
-for x in iter:
-    ...
-```
+- one `for`. no `while`, no `loop`.
+- one error mechanism: `! E` + `?`.
+- one string interpolation: `f"..."`.
+- one comment shape: `#`. one doc-comment shape: `##`.
+- one literal per type. one constructor pattern (`T{field: ...}` or `T.new(...)`).
 
-ranges (`0..n`), `enumerate`, `zip`, etc. are library functions that return
-iterators. no `while`, no `loop`, no `do…while`. infinite loops are
-`for _ in forever:`.
+(full list in `DECISIONS.md`.)
 
 ### 2. local reasoning
 
-an llm that reads a function should not need to scroll. lingo enforces this by:
+an llm reading a function should not have to scroll up. so:
 
-- function signatures must declare *all* parameter types and the return type.
-- function signatures must declare *all* errors they can return (`! E`).
-- a function may not capture *mutable* outer state implicitly — you pass it in.
+- function signatures declare *all* parameter types and the return type.
+- function signatures declare *the* error type they may return (`! E`).
+- a function may not capture mutable outer state implicitly — pass it in.
 - there are no globals except `const`.
 
-### 3. one shape for errors
+### 3. no hidden behaviour
 
-exceptions are invisible control flow. they're famously hard for both humans
-and models. lingo has **one** error mechanism, copied from rust/zig:
+every cost is visible at the call site:
 
-```lingo
-fn read_config(path: str) -> Config ! IoError | ParseError:
-    let bytes = fs.read(path)?
-    return Config.parse(bytes)?
-```
+- allocation? you can see `alloc: &Allocator` in the signature.
+- error? you can see `! E` and `?` at the call site.
+- mutation? you can see `&mut` at the call site.
+- task spawn? you can see `n.spawn(...)` inside a `nursery` block.
 
-`!` lists the error types. `?` propagates. there is no try/catch — you `match`
-on the result if you want to handle it. no exceptions, no panics for normal
-flow. `panic` exists but is only for unrecoverable bugs (asserts).
+if you can't see it, it doesn't happen.
 
-### 4. one shape for ownership
+### 4. structural, regular stdlib naming
 
-rust's borrow checker is powerful but its error messages are a meme. zig's
-manual memory is faster to learn but easier to get wrong. lingo picks a middle
-path:
-
-- **values are owned by their lexical scope.** when the scope ends, the
-  destructor runs.
-- **references (`&T`, `&mut T`) borrow** with a borrow checker, but the rules
-  are simpler than rust: no lifetimes in signatures, only structural borrow
-  checking. a reference may not outlive its scope. period.
-- **explicit allocators.** anything that allocates takes an `Allocator` —
-  heap, arena, page, gpa. no hidden allocations anywhere.
-
-```lingo
-fn join(parts: &[str], alloc: &Allocator) -> str:
-    ...
-```
-
-this is more verbose than python but it's *predictable*, which is what an llm
-needs.
-
-### 5. no implicit conversions
-
-`u8 + i32` is a compile error. you write `(a as i32) + b`. boolean context
-requires an actual `bool` — no truthiness on ints, strings, or pointers. `if
-xs:` is a compile error; you write `if xs.len() > 0:`.
-
-### 6. structural, regular stdlib naming
-
-every method on every container has the same name shape:
+every method on every container has the same shape:
 
 - constructors: `T.new`, `T.with_capacity`, `T.from_slice`
 - accessors: `.len()`, `.is_empty()`, `.get(i)`, `.first()`, `.last()`
 - mutators: `.push(x)`, `.pop()`, `.insert(i, x)`, `.remove(i)`
 - iteration: `.iter()`, `.iter_mut()`, `.into_iter()`
 
-no `strlen` vs `len(s)` vs `s.length` schizophrenia. the model only has to
-learn the shape once.
+no `strlen` vs `len(s)` vs `s.length` schizophrenia. the model learns the
+shape once.
 
 ## what "fast" actually means
 
-lingo's target is **within 10% of equivalent zig** for cpu-bound code. it gets
-there with:
+target: **within 10% of equivalent zig** for cpu-bound code.
 
-- **LLVM backend** for v0.2+, with a QBE fallback for fast debug builds.
-- **monomorphized generics** like rust — no runtime dispatch unless you ask
-  for it with `dyn Trait`.
-- **no GC.** memory is scope-bound (RAII) plus explicit allocators.
-- **value types by default.** structs are stack-allocated. `&` and `box[T]`
+mechanism:
+
+- **LLVM backend** for v0.2+. QBE fallback for fast debug builds.
+- **monomorphized generics**, like rust — no runtime dispatch unless you
+  ask for it (`dyn Trait`).
+- **no GC.** memory is scope-bound + explicit allocators.
+- **value types by default.** structs live on the stack. `&` and `box[T]`
   are explicit.
-- **inlining hints, comptime evaluation, simd intrinsics** as zig has.
-- **no exceptions, no setjmp, no hidden stack unwinding.**
+- **inlining hints, simd intrinsics, link-time optimisation.**
+- **no exceptions, no setjmp, no hidden unwinding.** errors are values, so
+  there's nothing for the runtime to unwind.
 
 ## what "simpler than python" actually means
 
-python is already very simple to *read*. lingo aims to be simpler to *learn*
-by removing surprises:
+python is simple to *read*. lingo is simple to *learn*, because there are no
+surprises:
 
 | python wart                             | lingo answer                                |
 | --------------------------------------- | ------------------------------------------- |
 | `self` everywhere                       | methods take `self`, but you call `x.f()`   |
-| `__dunder__` for everything             | traits with named methods (`Add.add`)       |
-| `__init__` vs `__new__` vs `dataclass`  | `struct` literal, one way                   |
-| mutable default args                    | not allowed                                 |
+| `__dunder__` for everything             | named traits with named methods (`Add.add`) |
+| `__init__` vs `__new__` vs `dataclass`  | `struct` literal `T{...}`, one way          |
+| mutable default args                    | no default args                             |
 | late binding of closures                | closures capture by value (`&` for ref)     |
-| GIL + asyncio + threading + multiproc   | one concurrency model (structured tasks)    |
+| GIL + asyncio + threading + multiproc   | one model: structured nursery               |
 | `list` vs `tuple` vs `array.array`      | `vec[T]` and `[T; N]`, that's it            |
 | dynamic typing surprises                | static types everywhere                     |
 | 4 ways to format a string               | one: `f"hello {name}"`                      |
 
-## comptime, not macros
+## why no borrow checker
 
-like zig, lingo has `comptime`: arbitrary code that runs at compile time.
-unlike rust macros and c preprocessor, comptime code is just lingo code — same
-syntax, same semantics. that means:
+rust's borrow checker is the best static memory-safety system in production
+software. it is also the #1 reason people bounce off rust. and its error
+messages, while better than they were, aren't *obvious*.
 
-- generics are functions that take `comptime T: type`.
-- conditional compilation is `if comptime target.os == .linux:`.
-- no separate macro language to learn (and no separate language for llms to
-  fail at).
+lingo picks the simpler model: **explicit allocators + scope-bound resources
++ `defer`**. it's a strict subset of zig's model. you give up the static
+"no use-after-free" guarantee for the rust-grade case, but you get:
 
-## traits, not classes
+- no lifetimes in signatures.
+- no generic-lifetime puzzles.
+- one place to read to find out "does this allocate?" — the signature.
 
-no inheritance. structs hold data. traits define behavior. `impl Trait for
-Struct:` adds methods. that's the whole oop story.
+it's a trade. we made it.
 
-```lingo
-trait Greet:
-    fn hello(self) -> str
+if the bootstrap compiler reveals real footguns, we add an optional borrow
+check pass on top of the existing model — never inside the type system.
 
-struct Cat:
-    name: str
+## why structured concurrency
 
-impl Greet for Cat:
-    fn hello(self) -> str:
-        return f"meow, i am {self.name}"
-```
+three options were on the table:
 
-## concurrency: structured tasks
+- **goroutines.** detached by default. great ergonomics. bad observability.
+  you lose tasks. resources leak silently. **not obvious.**
+- **async/await.** function colour split. half your stdlib has to be
+  duplicated. **not obvious.**
+- **structured concurrency (nursery / trio-style).** every task is bound to
+  a lexical scope. when the scope exits, all its tasks are joined or
+  cancelled. **obvious.**
 
-one model. inspired by trio / kotlin's structured concurrency.
+we picked #3. all functions are normal. parallelism is a block, not a
+keyword on every fn.
 
-```lingo
-fn fetch_all(urls: &[str]) -> [Response] ! HttpError:
-    with nursery() as n:
-        let results = urls.map(|u| n.spawn(|| http.get(u)))
-        return n.join_all(results)?
-```
+## why one error type per function
 
-- tasks are bound to a `nursery`. when the nursery exits, all tasks are joined
-  or cancelled.
-- no detached tasks. no callback hell. no two-color functions (`async fn`
-  doesn't exist — all functions are normal, the runtime is cooperative).
+the draft had `! A | B`. it's gone. reasoning:
 
-## what's deliberately missing
+- "one shape per concept" applies here too. the shape of an error in a
+  signature is **one type**, full stop.
+- if your fn has two error sources, you define an `enum` that wraps them.
+  this is one line of code and makes the union *named*, which the llm
+  (and you) can refer to in docs and tests.
+- with a `From<A> for Wrapped` impl, `?` auto-wraps. ergonomics are equal
+  to a union, but the union has a name.
 
-- **no inheritance** — composition + traits.
-- **no exceptions** — errors are values.
-- **no null** — `option[T]` is explicit, `?` works on options too.
-- **no implicit `this`** — `self` is a named parameter.
-- **no operator overloading** — except via traits (`Add`, `Mul`, ...).
-- **no macros that rewrite syntax** — comptime is enough.
-- **no significant overloading by arity** — `fn foo` and `fn foo2` if you need
-  two; or use default arguments.
+## why no user-facing comptime in v0.1
 
-## open questions
+zig's `comptime` is great. it is also conceptually heavy: types as values,
+functions that run at compile time, comptime branches that change the type
+of subsequent code. that's a lot of "non-obvious".
 
-these are not decided yet:
+generics in v0.1 are handled by the compiler — `fn first[T](xs: &[T])` works
+without exposing `comptime` to the user. when v1.0 reveals a real need for
+user-level metaprogramming, we add `comptime` then, with the benefit of
+hindsight.
 
-- **memory:** rust-style ownership vs. zig-style explicit allocators vs. a
-  hybrid. current bet: hybrid.
-- **strings:** utf-8 always, but bytes vs grapheme api split?
-- **modules:** file = module, directory = package. but how does naming work
-  for re-exports?
-- **ffi:** must be ergonomic enough to wrap c libraries in 5 lines. design
-  tbd.
-- **the name.** "lingo" is fine, but it's also a domain-squatter magnet.
+## why "make the writer type more"
 
-prs to this document are encouraged — the goal is to have something
-opinionated enough to *implement* by end of phase 0.
+every "the writer types more" rule (keyword args, no shadowing, no defaults,
+explicit allocator) costs the human a few extra characters and saves the
+reader a guess. since:
+
+- one piece of code is *written* once and *read* many times,
+- the agent reads it *every time* it wants to modify it,
+- bugs are a function of "what the reader misunderstood",
+
+we trade writer effort for reader certainty. always.
+
+## decided. not "open".
+
+this document used to have an "open questions" section. it doesn't anymore.
+every question is answered in `DECISIONS.md`. if you want to change an
+answer, open an issue with a concrete proposal.
