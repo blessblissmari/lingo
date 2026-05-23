@@ -1,0 +1,21 @@
+# str runtime in the C backend: concat (`+`), equality, len, contains,
+# starts_with / ends_with, and f-strings.  Each f-string interpolation
+# leaks (malloc'd) until we wire up an allocator + defer.
+
+fn greet(name: str, age: i64) -> str:
+    return f"hi {name}, you are {age}"
+
+fn main():
+    let a = "hello"
+    let b = ", world"
+    let s = a + b
+    print(s)                              # hello, world
+    print("len:", s.len())                # 12
+    print("eq:", s == "hello, world")     # true
+    print("ne:", s != a)                  # true
+    print("contains:", s.contains("world"))   # true
+    print("starts:", s.starts_with("hello"))  # true
+    print("ends:", s.ends_with("!"))      # false
+    print(greet("ada", 42))               # hi ada, you are 42
+    let n = 7
+    print(f"square of {n} is {n * n}")    # square of 7 is 49
