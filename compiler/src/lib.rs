@@ -17,6 +17,7 @@ pub mod error;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod repl;
 
 pub use error::{LingoError, Stage};
 
