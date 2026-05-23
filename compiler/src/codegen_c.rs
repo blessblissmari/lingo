@@ -34,6 +34,7 @@ use crate::error::{LingoError, Span, Stage};
 enum CType {
     I64,
     U64,
+    F64,
     Bool,
     Str, // const char*
     Void,
@@ -51,6 +52,7 @@ impl CType {
         match self {
             CType::I64 => "int64_t".into(),
             CType::U64 => "uint64_t".into(),
+            CType::F64 => "double".into(),
             CType::Bool => "bool".into(),
             CType::Str => "const char*".into(),
             CType::Void => "void".into(),
@@ -66,6 +68,7 @@ impl CType {
         match self {
             CType::I64 => "%\" PRId64 \"",
             CType::U64 => "%\" PRIu64 \"",
+            CType::F64 => "%g",
             CType::Bool => "%s", // we print "true"/"false"
             CType::Str => "%s",
             CType::Void => "",
@@ -94,6 +97,7 @@ fn map_type_with(
     Ok(match t.name.as_str() {
         "int" | "i64" => CType::I64,
         "u64" => CType::U64,
+        "f64" | "float" => CType::F64,
         "bool" => CType::Bool,
         "str" => CType::Str,
         other => {
@@ -130,6 +134,10 @@ pub struct Codegen {
     /// Function signatures, looked up to type return values.
     /// For impl methods we register `Type_method` with `self` as the first param.
     fn_sigs: HashMap<String, (Vec<CType>, CType)>,
+    /// Parameter names parallel to `fn_sigs`.  Stored separately so the rest of
+    /// the codegen doesn't have to thread name-typed tuples around.  Used by
+    /// `gen_call` to resolve keyword arguments to positional slots.
+    fn_param_names: HashMap<String, Vec<String>>,
     /// `struct_name -> [(field_name, field_type)]`, in declared order.
     structs: HashMap<String, Vec<(String, CType)>>,
     /// `enum_name -> EnumDecl`, kept around for variant lookup.
@@ -147,6 +155,7 @@ impl Codegen {
             protos: String::new(),
             type_defs: String::new(),
             fn_sigs: HashMap::new(),
+            fn_param_names: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
             scopes: Vec::new(),
@@ -315,6 +324,7 @@ impl Codegen {
         out.push_str("#include <stdint.h>\n");
         out.push_str("#include <inttypes.h>\n");
         out.push_str("#include <stdbool.h>\n");
+        out.push_str("#include <math.h>\n"); // for `pow`, `sqrt`, etc. when f64 lands
         out.push_str("\n");
         if !self.type_defs.is_empty() {
             out.push_str(&self.type_defs);
@@ -358,6 +368,8 @@ impl Codegen {
             Some(t) => format!("{}_{}", t, f.name),
             None => f.name.clone(),
         };
+        let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        self.fn_param_names.insert(name.clone(), param_names);
         self.fn_sigs.insert(name, (params, ret));
         Ok(())
     }
@@ -806,12 +818,18 @@ impl Codegen {
                     CType::Struct(name.clone()),
                 )
             }
-            ExprKind::Float(_) => {
-                return Err(LingoError::new(
-                    Stage::Resolve,
-                    "C backend: floats land in v0.2",
-                    e.span,
-                ));
+            ExprKind::Float(f) => {
+                // {:?} on f64 always includes a decimal point ("1" -> "1.0"), so the
+                // emitted token is unambiguously a C double literal.  We don't try
+                // to round-trip-perfectly; -O2 will fold these to identical IEEE bits.
+                let s = if f.is_nan() {
+                    "(0.0/0.0)".to_string()
+                } else if f.is_infinite() {
+                    if *f > 0.0 { "(1.0/0.0)".to_string() } else { "(-1.0/0.0)".to_string() }
+                } else {
+                    format!("{:?}", f)
+                };
+                (s, CType::F64)
             }
             ExprKind::None_ => {
                 return Err(LingoError::new(
@@ -862,7 +880,21 @@ impl Codegen {
         let (b_code, b_ty) = self.gen_expr(b)?;
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                let ty = if a_ty == CType::U64 || b_ty == CType::U64 {
+                // Float-aware numeric op.  We don't do implicit numeric promotion in
+                // lingo, but if either operand is f64 we treat the whole expression
+                // as f64 and let C upcast the int side (which is exactly what lingo's
+                // type checker will require at the boundary).
+                let is_float = a_ty == CType::F64 || b_ty == CType::F64;
+                if op == BinOp::Mod && is_float {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `%` on f64 isn't supported (use `fmod` in v0.2)",
+                        a.span,
+                    ));
+                }
+                let ty = if is_float {
+                    CType::F64
+                } else if a_ty == CType::U64 || b_ty == CType::U64 {
                     CType::U64
                 } else {
                     CType::I64
@@ -878,16 +910,18 @@ impl Codegen {
                 Ok((format!("({} {} {})", a_code, sym, b_code), ty))
             }
             BinOp::Pow => {
-                // integer pow — keep it simple, generate a runtime helper inline
-                // 2 ** n with i64 / u64. (we punt on overflow; that's a v0.2 problem.)
+                // For floats we lower to `pow()` from <math.h>.  For integers we keep
+                // the original repeated-multiplication helper.
+                if a_ty == CType::F64 || b_ty == CType::F64 {
+                    let a_cast = if a_ty == CType::F64 { a_code } else { format!("(double)({})", a_code) };
+                    let b_cast = if b_ty == CType::F64 { b_code } else { format!("(double)({})", b_code) };
+                    return Ok((format!("pow({}, {})", a_cast, b_cast), CType::F64));
+                }
                 let ty = if a_ty == CType::U64 || b_ty == CType::U64 {
                     CType::U64
                 } else {
                     CType::I64
                 };
-                // emit a one-shot helper using a comma expression + statement expression
-                // would be GCC-only; safer to require pow to be lifted later.
-                // For now, use a fixed __builtin call via repeated multiplication helper.
                 Ok((format!("lingo_ipow({}, {})", a_code, b_code), ty))
             }
             BinOp::Eq => Ok((format!("({} == {})", a_code, b_code), CType::Bool)),
@@ -1023,19 +1057,74 @@ impl Codegen {
                 span,
             ));
         }
+        // Resolve a mix of positional + keyword args to a fully-positional
+        // C-call list.  Lingo's rule (>2 params requires keywords) is enforced
+        // at parse time, so by the time we're here we only need to (a) gather
+        // names if present and (b) reject collisions / unknown names.
         let mut parts: Vec<String> = Vec::with_capacity(total);
+        let self_count = if prepend_self_code.is_some() { 1 } else { 0 };
         if let Some(s) = prepend_self_code {
             parts.push(s);
         }
+        let param_names = self.fn_param_names.get(&mangled).cloned().unwrap_or_default();
+        // For static methods (`Type.method`) param_names already starts after `self`.
+        // For instance methods we registered `self` as param[0], so skip it here.
+        let param_name_slice: &[String] = if !param_names.is_empty()
+            && self_count == 1
+            && param_names[0] == "self"
+        {
+            &param_names[1..]
+        } else {
+            &param_names[..]
+        };
+        let expected = param_name_slice.len();
+        // Fill from positional args first.
+        let mut chosen: Vec<Option<String>> = vec![None; expected];
+        let mut next_positional = 0usize;
         for a in args {
-            if a.name.is_some() {
-                return Err(LingoError::new(
-                    Stage::Resolve,
-                    "C backend: keyword args land in v0.2",
-                    a.span,
-                ));
+            if let Some(name) = &a.name {
+                let Some(idx) = param_name_slice.iter().position(|p| p == name) else {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("`{}` has no parameter `{}`", mangled, name),
+                        a.span,
+                    ));
+                };
+                if chosen[idx].is_some() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("parameter `{}` set twice in call to `{}`", name, mangled),
+                        a.span,
+                    ));
+                }
+                let (code, _) = self.gen_expr(&a.value)?;
+                chosen[idx] = Some(code);
+            } else {
+                if next_positional >= expected {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("too many positional args in call to `{}`", mangled),
+                        a.span,
+                    ));
+                }
+                if chosen[next_positional].is_some() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "positional arg follows a keyword arg for the same slot",
+                        a.span,
+                    ));
+                }
+                let (code, _) = self.gen_expr(&a.value)?;
+                chosen[next_positional] = Some(code);
+                next_positional += 1;
             }
-            let (code, _) = self.gen_expr(&a.value)?;
+        }
+        for (i, slot) in chosen.into_iter().enumerate() {
+            let code = slot.ok_or_else(|| LingoError::new(
+                Stage::Resolve,
+                format!("missing arg `{}` in call to `{}`", param_name_slice[i], mangled),
+                span,
+            ))?;
             parts.push(code);
         }
         Ok((format!("{}({})", mangled, parts.join(", ")), ret))
@@ -1082,7 +1171,9 @@ static int64_t lingo_ipow(int64_t base, int64_t exp) {
 ";
     // Insert helper right before the protos section.
     // (Protos always start after the three #include lines + blank.)
-    let marker = "#include <stdbool.h>\n\n";
+    // Insertion point is right after the prelude block.  The last include
+    // we emit is <math.h>; if that changes, update this marker too.
+    let marker = "#include <math.h>\n\n";
     Ok(match core.find(marker) {
         Some(idx) => {
             let split = idx + marker.len();
