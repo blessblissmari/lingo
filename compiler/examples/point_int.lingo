@@ -1,0 +1,21 @@
+# integer-coord variant of `point.lingo` — fits the v0.1.8 C backend subset
+# (no floats yet). showcases structs + static method + instance method.
+
+struct Pt:
+    x: i64
+    y: i64
+
+impl Pt:
+    fn origin() -> Pt:
+        return Pt{x: 0, y: 0}
+
+    fn dist_sq(self, other: Pt) -> i64:
+        let dx = self.x - other.x
+        let dy = self.y - other.y
+        return dx * dx + dy * dy
+
+fn main():
+    let a = Pt.origin()
+    let b = Pt{x: 3, y: 4}
+    print("dist_sq(a, b):", a.dist_sq(b))
+    print("dist_sq(b, a):", b.dist_sq(a))
