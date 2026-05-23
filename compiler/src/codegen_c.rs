@@ -60,6 +60,10 @@ enum CType {
     /// have an allocator + monomorphization this becomes a real open-addressing
     /// hash table with the right hashing per key type.
     Map(Box<CType>, Box<CType>),
+    /// `T ! E` — fallible function return.  Lowered to a per-(T, E)
+    /// monomorphized struct `{ bool is_err; T ok; E err; }`.  The E is
+    /// always an enum (lingo's design); T can be any non-result type.
+    Result(Box<CType>, Box<CType>),
 }
 
 impl CType {
@@ -87,6 +91,27 @@ impl CType {
                 (CType::Str, CType::I64) => "lingo_map_str_i64_t".into(),
                 other => panic!("unsupported map key/value types in codegen: {:?}", other),
             },
+            CType::Result(t, e) => {
+                let e_name = match e.as_ref() {
+                    CType::Enum(n) => n.clone(),
+                    other => panic!("Result error type must be an enum, got {:?}", other),
+                };
+                format!("lingo_result_{}_{}_t", t.mono_suffix(), e_name)
+            }
+        }
+    }
+
+    /// Suffix used in monomorphized names (`lingo_vec_<sfx>_*`, `lingo_result_<sfx>_*`).
+    fn mono_suffix(&self) -> String {
+        match self {
+            CType::I64 => "i64".into(),
+            CType::U64 => "u64".into(),
+            CType::F64 => "f64".into(),
+            CType::Bool => "bool".into(),
+            CType::Str => "str".into(),
+            CType::Void => "void".into(),
+            CType::Struct(n) | CType::Enum(n) => n.clone(),
+            other => panic!("no mono suffix for {:?}", other),
         }
     }
 
@@ -105,6 +130,32 @@ impl CType {
             CType::Enum(_) => "<enum>",     // not directly printable yet
             CType::Vec(_) => "<vec>",        // printed via emit_print special-case
             CType::Map(_, _) => "<map>",     // not directly printable yet
+            CType::Result(_, _) => "<result>", // not directly printable
+        }
+    }
+}
+
+/// Reverse-lookup a `mono_suffix` (i64/f64/str/.../<TypeName>) back to a C
+/// type declaration string.  Used when emitting `lingo_result_<T>_<E>_t`
+/// typedefs since we only stored the suffix in `result_pairs`.
+fn mono_suffix_to_c_decl(
+    sfx: &str,
+    structs: &HashMap<String, Vec<(String, CType)>>,
+    enums: &HashMap<String, EnumDecl>,
+) -> String {
+    match sfx {
+        "i64" => "int64_t".into(),
+        "u64" => "uint64_t".into(),
+        "f64" => "double".into(),
+        "bool" => "bool".into(),
+        "str" => "const char*".into(),
+        "void" => "void".into(),
+        other => {
+            if structs.contains_key(other) || enums.contains_key(other) {
+                other.into()
+            } else {
+                panic!("unknown mono suffix `{}`", other)
+            }
         }
     }
 }
@@ -263,6 +314,13 @@ pub struct Codegen {
     /// (`__pr_<N>` in debug prints, `__match_<N>` in match lowering).
     /// Reset per function in `emit_fn_body` to keep names short and readable.
     tmp_counter: usize,
+    /// Distinct `(T_suffix, E_name)` pairs we've seen in fn signatures.
+    /// One `lingo_result_<T>_<E>_t` typedef + sentinels gets emitted per pair.
+    result_pairs: std::collections::BTreeSet<(String, String)>,
+    /// While emitting a function body: its raises type, if any.  Used by
+    /// `Stmt::Return`, `Stmt::Raise`, and `Try` to wrap/propagate the
+    /// `lingo_result_..._t` value correctly.
+    current_fn_raises: Option<(CType, CType)>,
 }
 
 impl Codegen {
@@ -278,6 +336,8 @@ impl Codegen {
             scopes: Vec::new(),
             indent: 0,
             tmp_counter: 0,
+            result_pairs: std::collections::BTreeSet::new(),
+            current_fn_raises: None,
         }
     }
 
@@ -489,6 +549,18 @@ impl Codegen {
             }
         }
 
+        // Pass 2.5: emit `lingo_result_<T>_<E>_t` typedefs for every distinct
+        // (T_sfx, E) pair we saw in fallible function signatures.  Goes into
+        // `self.type_defs` after enums so the E typedef is in scope.
+        let pairs: Vec<(String, String)> = self.result_pairs.iter().cloned().collect();
+        for (t_sfx, e_name) in &pairs {
+            let t_c = mono_suffix_to_c_decl(t_sfx, &self.structs, &self.enums);
+            let v = format!("lingo_result_{}_{}_t", t_sfx, e_name);
+            writeln!(self.type_defs,
+                "typedef struct {{ bool is_err; {t} ok; {e} err; }} {v};",
+                t = t_c, e = e_name, v = v).unwrap();
+        }
+
         // Pass 3: emit prototypes and bodies.
         for item in items {
             match item {
@@ -553,13 +625,6 @@ impl Codegen {
     /// in which case the mangled name `<Type>_<fn>` is used and `self: Self` is
     /// substituted to `self: Type`.
     fn register_fn_sig(&mut self, f: &FnDecl, impl_target: Option<&str>) -> Result<(), LingoError> {
-        if f.raises.is_some() {
-            return Err(LingoError::new(
-                Stage::Resolve,
-                "C backend: fallible fns (`! E`) need the v0.2 result lowering",
-                f.span,
-            ));
-        }
         let mut params = Vec::with_capacity(f.params.len());
         for p in &f.params {
             if p.name == "self" {
@@ -579,9 +644,28 @@ impl Codegen {
                 params.push(map_type_with(&p.ty, p.span, Some(&self.structs), Some(&self.enums))?);
             }
         }
-        let ret = match &f.return_type {
+        let ret_ok = match &f.return_type {
             Some(t) => map_type_with(t, f.span, Some(&self.structs), Some(&self.enums))?,
             None => CType::Void,
+        };
+        // `! E` makes the fn fallible: real C return type becomes
+        // `lingo_result_<T>_<E>_t`.  We register the (T_sfx, E_name) pair
+        // for typedef emission.
+        let ret = if let Some(rty) = &f.raises {
+            let e_ty = map_type_with(rty, f.span, Some(&self.structs), Some(&self.enums))?;
+            match &e_ty {
+                CType::Enum(name) => {
+                    self.result_pairs.insert((ret_ok.mono_suffix(), name.clone()));
+                }
+                other => return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("C backend: `! E` requires E to be an enum, got `{}`", other.c_decl()),
+                    f.span,
+                )),
+            }
+            CType::Result(Box::new(ret_ok), Box::new(e_ty))
+        } else {
+            ret_ok
         };
         let name = match impl_target {
             Some(t) => format!("{}_{}", t, f.name),
@@ -629,13 +713,20 @@ impl Codegen {
         self.indent = 1;
         self.tmp_counter = 0;
         self.scopes.push(HashMap::new());
-        let (params, _) = self.fn_sigs.get(c_name).cloned().unwrap();
+        let (params, ret) = self.fn_sigs.get(c_name).cloned().unwrap();
         for (i, p) in f.params.iter().enumerate() {
             self.scopes.last_mut().unwrap().insert(p.name.clone(), params[i].clone());
         }
+        // Set up current_fn_raises so Return / Raise / Try know how to lower.
+        self.current_fn_raises = if let CType::Result(t, e) = &ret {
+            Some(((**t).clone(), (**e).clone()))
+        } else {
+            None
+        };
         for s in &f.body.stmts {
             self.emit_stmt(s)?;
         }
+        self.current_fn_raises = None;
         // For `main`, always finish with `return 0;` (C requires an int return).
         if c_name == "main" {
             writeln!(self.body, "{}return 0;", self.pad()).unwrap();
@@ -712,12 +803,46 @@ impl Codegen {
                 writeln!(self.body, "{}{} = {};", self.pad(), name, code).unwrap();
             }
             Stmt::Return { value, span: _ } => {
-                if let Some(e) = value {
+                if let Some(raises) = &self.current_fn_raises.clone() {
+                    // Fallible fn: wrap the value as the `ok` variant of the
+                    // monomorphized `lingo_result_<T>_<E>_t`.  `return` without
+                    // a value is only allowed for `Result(Void, E)` — not yet.
+                    let v = value.as_ref().ok_or_else(|| LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `return` without a value in a fallible function isn't supported yet",
+                        Span::dummy(),
+                    ))?;
+                    let (code, _) = self.gen_expr(v)?;
+                    let res_ty = CType::Result(Box::new(raises.0.clone()), Box::new(raises.1.clone()));
+                    writeln!(self.body,
+                        "{}return ({}){{ .is_err = false, .ok = {} }};",
+                        self.pad(), res_ty.c_decl(), code).unwrap();
+                } else if let Some(e) = value {
                     let (code, _) = self.gen_expr(e)?;
                     writeln!(self.body, "{}return {};", self.pad(), code).unwrap();
                 } else {
                     writeln!(self.body, "{}return;", self.pad()).unwrap();
                 }
+            }
+            Stmt::Raise { value, span } => {
+                let raises = self.current_fn_raises.clone().ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `raise` used outside a fallible function (the fn must have `! E`)",
+                    *span,
+                ))?;
+                let (code, val_ty) = self.gen_expr(value)?;
+                if val_ty != raises.1 {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `raise` value type `{}` doesn't match fn's `! {}`",
+                                val_ty.c_decl(), raises.1.c_decl()),
+                        *span,
+                    ));
+                }
+                let res_ty = CType::Result(Box::new(raises.0.clone()), Box::new(raises.1.clone()));
+                writeln!(self.body,
+                    "{}return ({}){{ .is_err = true, .err = {} }};",
+                    self.pad(), res_ty.c_decl(), code).unwrap();
             }
             Stmt::If { arms, else_block, span: _ } => {
                 for (i, (cond, block)) in arms.iter().enumerate() {
@@ -861,6 +986,7 @@ impl Codegen {
                 let (code, _) = self.gen_expr(e)?;
                 writeln!(self.body, "{}{};", self.pad(), code).unwrap();
             }
+            #[allow(unreachable_patterns)]
             other => {
                 return Err(LingoError::new(
                     Stage::Resolve,
@@ -877,12 +1003,17 @@ impl Codegen {
     /// Literal patterns are out of scope for now.
     fn emit_match(&mut self, scrut: &Expr, arms: &[MatchArm], span: Span) -> Result<(), LingoError> {
         let (scrut_code, scrut_ty) = self.gen_expr(scrut)?;
+        // Result scrutinee gets its own lowering — `ok(...)` / `err(...)` arms,
+        // not a switch on a tag.  We need this for `parse_port` and friends.
+        if let CType::Result(t, e) = &scrut_ty {
+            return self.emit_match_result(scrut_code, (**t).clone(), (**e).clone(), arms, span);
+        }
         let enum_name = match &scrut_ty {
             CType::Enum(n) => n.clone(),
             _ => {
                 return Err(LingoError::new(
                     Stage::Resolve,
-                    "C backend: `match` only supports enum scrutinees in v0.1.9",
+                    "C backend: `match` only supports enum or `T!E` scrutinees in v0.1.x",
                     span,
                 ));
             }
@@ -1008,6 +1139,222 @@ impl Codegen {
             writeln!(self.body, "{}default: __builtin_unreachable();", self.pad()).unwrap();
         }
         writeln!(self.body, "{}}}", self.pad()).unwrap();
+        Ok(())
+    }
+
+    /// `match` lowering for `T ! E` scrutinees.  Arms are matched in order
+    /// against a `do { ... } while(0);` chain of `if (...) { ...; break; }`
+    /// guards.  Supported patterns:
+    ///   ok(bind | _)            // unwrap the value when no error
+    ///   err(<enum-variant-pat>) // recursively match the error enum
+    ///   err(bind | _)           // bind the whole error
+    ///   _                       // catch-all
+    ///   bind_name               // catch-all that binds the whole result
+    fn emit_match_result(
+        &mut self,
+        scrut_code: String,
+        t: CType,
+        e: CType,
+        arms: &[MatchArm],
+        _span: Span,
+    ) -> Result<(), LingoError> {
+        let res_ty = CType::Result(Box::new(t.clone()), Box::new(e.clone()));
+        let e_name = match &e {
+            CType::Enum(n) => n.clone(),
+            other => return Err(LingoError::new(
+                Stage::Resolve,
+                format!("internal: result error type is not an enum: {}", other.c_decl()),
+                Span::dummy(),
+            )),
+        };
+        let decl = self.enums.get(&e_name).cloned().unwrap();
+        let tmp = format!("__match_{}", self.tmp_counter);
+        self.tmp_counter += 1;
+        writeln!(self.body, "{}{} {} = {};",
+                 self.pad(), res_ty.c_decl(), tmp, scrut_code).unwrap();
+        writeln!(self.body, "{}do {{", self.pad()).unwrap();
+        self.indent += 1;
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Wildcard(_) => {
+                    writeln!(self.body, "{}{{", self.pad()).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                    self.scopes.pop();
+                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                }
+                Pattern::Bind(name, _) => {
+                    writeln!(self.body, "{}{{", self.pad()).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    writeln!(self.body, "{}{} {} = {};",
+                             self.pad(), res_ty.c_decl(), name, tmp).unwrap();
+                    self.scopes.last_mut().unwrap().insert(name.clone(), res_ty.clone());
+                    for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                    self.scopes.pop();
+                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                }
+                Pattern::Variant { type_name, variant, sub, span: pat_span } => {
+                    // `ok` and `err` are bare variants (type_name = None).
+                    if type_name.is_some() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("C backend: result match patterns must be `ok(...)` or `err(...)`, got `{}.{}`",
+                                    type_name.as_ref().unwrap(), variant),
+                            *pat_span,
+                        ));
+                    }
+                    match variant.as_str() {
+                        "ok" => {
+                            if sub.len() != 1 {
+                                return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    "C backend: `ok(...)` pattern takes exactly one sub-pattern",
+                                    *pat_span,
+                                ));
+                            }
+                            writeln!(self.body, "{}if (!{}.is_err) {{", self.pad(), tmp).unwrap();
+                            self.indent += 1;
+                            self.scopes.push(HashMap::new());
+                            match &sub[0] {
+                                Pattern::Wildcard(_) => {}
+                                Pattern::Bind(bname, _) => {
+                                    writeln!(self.body, "{}{} {} = {}.ok; (void){};",
+                                             self.pad(), t.c_decl(), bname, tmp, bname).unwrap();
+                                    self.scopes.last_mut().unwrap().insert(bname.clone(), t.clone());
+                                }
+                                _ => return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    "C backend: `ok(...)` sub-pattern must be `bind` or `_`",
+                                    *pat_span,
+                                )),
+                            }
+                            for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                            self.scopes.pop();
+                            writeln!(self.body, "{}break;", self.pad()).unwrap();
+                            self.indent -= 1;
+                            writeln!(self.body, "{}}}", self.pad()).unwrap();
+                        }
+                        "err" => {
+                            if sub.len() != 1 {
+                                return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    "C backend: `err(...)` pattern takes exactly one sub-pattern",
+                                    *pat_span,
+                                ));
+                            }
+                            // The sub-pattern can be a bind/_ (capture the whole error)
+                            // or a variant pattern matching the underlying enum.
+                            match &sub[0] {
+                                Pattern::Wildcard(_) => {
+                                    writeln!(self.body, "{}if ({}.is_err) {{", self.pad(), tmp).unwrap();
+                                    self.indent += 1;
+                                    self.scopes.push(HashMap::new());
+                                    for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                                    self.scopes.pop();
+                                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                                    self.indent -= 1;
+                                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                                }
+                                Pattern::Bind(bname, _) => {
+                                    writeln!(self.body, "{}if ({}.is_err) {{", self.pad(), tmp).unwrap();
+                                    self.indent += 1;
+                                    self.scopes.push(HashMap::new());
+                                    writeln!(self.body, "{}{} {} = {}.err;",
+                                             self.pad(), e.c_decl(), bname, tmp).unwrap();
+                                    self.scopes.last_mut().unwrap().insert(bname.clone(), e.clone());
+                                    for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                                    self.scopes.pop();
+                                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                                    self.indent -= 1;
+                                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                                }
+                                Pattern::Variant { type_name: vt_name, variant: v_name, sub: v_sub, span: v_span } => {
+                                    if let Some(tn) = vt_name {
+                                        if tn != &e_name {
+                                            return Err(LingoError::new(
+                                                Stage::Resolve,
+                                                format!("pattern type `{}` doesn't match error type `{}`", tn, e_name),
+                                                *v_span,
+                                            ));
+                                        }
+                                    }
+                                    let variant_decl = decl.variants.iter()
+                                        .find(|x| x.name == *v_name)
+                                        .ok_or_else(|| LingoError::new(
+                                            Stage::Resolve,
+                                            format!("`{}` has no variant `{}`", e_name, v_name),
+                                            *v_span,
+                                        ))?;
+                                    if v_sub.len() != variant_decl.payload.len() {
+                                        return Err(LingoError::new(
+                                            Stage::Resolve,
+                                            format!("variant `{}.{}` binds {} values, pattern has {}",
+                                                    e_name, v_name, variant_decl.payload.len(), v_sub.len()),
+                                            *v_span,
+                                        ));
+                                    }
+                                    writeln!(self.body, "{}if ({}.is_err && {}.err.tag == {}_{}_TAG) {{",
+                                             self.pad(), tmp, tmp, e_name, v_name).unwrap();
+                                    self.indent += 1;
+                                    self.scopes.push(HashMap::new());
+                                    for (i, sp) in v_sub.iter().enumerate() {
+                                        match sp {
+                                            Pattern::Wildcard(_) => {}
+                                            Pattern::Bind(bname, _) => {
+                                                let pty = map_type_with(
+                                                    &variant_decl.payload[i],
+                                                    *v_span,
+                                                    Some(&self.structs),
+                                                    Some(&self.enums),
+                                                )?;
+                                                writeln!(self.body, "{}{} {} = {}.err.as.{}._{};",
+                                                         self.pad(), pty.c_decl(), bname, tmp, v_name, i).unwrap();
+                                                self.scopes.last_mut().unwrap().insert(bname.clone(), pty);
+                                            }
+                                            _ => return Err(LingoError::new(
+                                                Stage::Resolve,
+                                                "C backend: nested patterns inside `err(...)` only support `name` or `_`",
+                                                *v_span,
+                                            )),
+                                        }
+                                    }
+                                    for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                                    self.scopes.pop();
+                                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                                    self.indent -= 1;
+                                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                                }
+                                _ => return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    "C backend: `err(...)` sub-pattern must be a variant, a bind, or `_`",
+                                    *pat_span,
+                                )),
+                            }
+                        }
+                        other => return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("C backend: result match expects `ok` or `err`, got `{}`", other),
+                            *pat_span,
+                        )),
+                    }
+                }
+                Pattern::Literal(_, lit_span) => {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: literal patterns aren't supported on result scrutinees",
+                        *lit_span,
+                    ));
+                }
+            }
+        }
+        self.indent -= 1;
+        writeln!(self.body, "{}}} while (0);", self.pad()).unwrap();
         Ok(())
     }
 
@@ -1268,6 +1615,44 @@ impl Codegen {
                     "C backend: ranges only appear inside `for` headers",
                     e.span,
                 ));
+            }
+            ExprKind::Try(inner) => {
+                // `x?` — eager unwrap + propagate error to the caller.
+                // Only valid inside a fallible function (`fn ... -> T ! E`).
+                let raises = self.current_fn_raises.clone().ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `?` used outside a fallible function (the fn must have `! E`)",
+                    e.span,
+                ))?;
+                let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                let (inner_t, inner_e) = match &inner_ty {
+                    CType::Result(t, e2) => ((**t).clone(), (**e2).clone()),
+                    other => return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `?` applied to non-Result value of type `{}`", other.c_decl()),
+                        e.span,
+                    )),
+                };
+                if inner_e != raises.1 {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `?` propagates `{}` but caller raises `{}`",
+                                inner_e.c_decl(), raises.1.c_decl()),
+                        e.span,
+                    ));
+                }
+                let n = self.tmp_counter;
+                self.tmp_counter += 1;
+                let inner_res = CType::Result(Box::new(inner_t.clone()), Box::new(inner_e.clone()));
+                let outer_res = CType::Result(Box::new(raises.0.clone()), Box::new(raises.1.clone()));
+                let code = format!(
+                    "({{ {ir} __tr_{n} = {expr}; if (__tr_{n}.is_err) return ({or}){{ .is_err = true, .err = __tr_{n}.err }}; __tr_{n}.ok; }})",
+                    ir = inner_res.c_decl(),
+                    or = outer_res.c_decl(),
+                    expr = inner_code,
+                    n = n,
+                );
+                (code, inner_t)
             }
             ExprKind::FString(parts) => {
                 // Lower `f"hello, {name}, you are {age}"` to a snprintf call:
@@ -2066,6 +2451,7 @@ fn debug_fmt_for(t: &CType) -> String {
         CType::Enum(_) => "<enum>".into(),
         CType::Vec(_) => "<vec>".into(),
         CType::Map(_, _) => "<map>".into(),
+        CType::Result(_, _) => "<result>".into(),
     }
 }
 
