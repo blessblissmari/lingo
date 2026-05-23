@@ -12,6 +12,52 @@ fn cargo_bin() -> String {
     env!("CARGO_BIN_EXE_lingo").to_string()
 }
 
+/// Compile a lingo example via the C backend and run the resulting binary.
+/// Returns (stdout, stderr, exit_code) of the compiled program.
+/// Skipped silently when no C compiler is available.
+fn run_native(file: &str) -> Option<(String, String, i32)> {
+    if which_cc().is_none() {
+        return None;
+    }
+    let tmp = std::env::temp_dir().join(format!("lingo_native_{}", file.replace('/', "_")));
+    let _ = std::fs::remove_file(&tmp);
+    // build
+    let build = Command::new(cargo_bin())
+        .arg("build")
+        .arg(format!("examples/{file}"))
+        .env("LINGO_OUT", tmp.to_string_lossy().to_string())
+        .output()
+        .expect("failed to invoke lingo build");
+    if !build.status.success() {
+        panic!(
+            "lingo build failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+    // `lingo build` writes the binary into the cwd; find it by stem.
+    let stem = std::path::Path::new(file).file_stem().unwrap().to_string_lossy().to_string();
+    let bin = std::path::Path::new(&stem).to_path_buf();
+    if !bin.exists() {
+        return None;
+    }
+    let run = Command::new(format!("./{}", stem)).output().ok()?;
+    Some((
+        String::from_utf8_lossy(&run.stdout).to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+        run.status.code().unwrap_or(-1),
+    ))
+}
+
+fn which_cc() -> Option<String> {
+    for cc in &["cc", "gcc", "clang"] {
+        if Command::new(cc).arg("--version").output().is_ok() {
+            return Some(cc.to_string());
+        }
+    }
+    None
+}
+
 fn run(file: &str) -> (String, String, i32) {
     run_with_args(file, &[])
 }
@@ -139,6 +185,29 @@ unique words: 4
 parsed: 42
 ";
     assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_hello_native() {
+    let Some((stdout, stderr, code)) = run_native("hello.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "hello, lingo\n");
+}
+
+#[test]
+fn c_backend_fib_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("fib.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("fib.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
+fn c_backend_math_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("math.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("math.lingo");
+    assert_eq!(native_out, interp_out);
 }
 
 #[test]
