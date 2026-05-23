@@ -84,11 +84,12 @@ impl Parser {
             Tok::Const => Ok(Item::Const(self.const_decl()?)),
             Tok::Struct => Ok(Item::Struct(self.struct_decl()?)),
             Tok::Enum => Ok(Item::Enum(self.enum_decl()?)),
-            Tok::Impl => Ok(Item::Impl(self.impl_block()?)),
+            Tok::Impl => self.impl_or_impl_trait(),
+            Tok::Trait => Ok(Item::Trait(self.trait_decl()?)),
             other => Err(LingoError::new(
                 Stage::Parse,
                 format!(
-                    "expected `fn`, `const`, `struct`, `enum`, or `impl` at top level, got {:?}",
+                    "expected `fn`, `const`, `struct`, `enum`, `impl`, or `trait` at top level, got {:?}",
                     other
                 ),
                 self.peek().span,
@@ -194,14 +195,48 @@ impl Parser {
         })
     }
 
-    fn impl_block(&mut self) -> Result<ImplBlock, LingoError> {
+    /// Dispatches between an inherent `impl Type:` block and a
+    /// `impl Trait for Type:` block, depending on whether `for` follows
+    /// the first identifier.
+    fn impl_or_impl_trait(&mut self) -> Result<Item, LingoError> {
         let start = self.peek().span.start;
         self.expect(Tok::Impl, "`impl`")?;
-        let name_tok = self.expect(Tok::Ident("".into()), "type to impl")?;
-        let target = match name_tok.tok {
+        let first_tok = self.expect(Tok::Ident("".into()), "type or trait name")?;
+        let first_name = match first_tok.tok {
             Tok::Ident(s) => s,
             _ => unreachable!(),
         };
+        if self.eat(Tok::For) {
+            // impl <Trait> for <Type>:
+            let type_tok = self.expect(Tok::Ident("".into()), "type to impl trait for")?;
+            let target = match type_tok.tok {
+                Tok::Ident(s) => s,
+                _ => unreachable!(),
+            };
+            self.expect(Tok::Colon, "`:`")?;
+            self.expect(Tok::Newline, "newline")?;
+            self.skip_newlines();
+            self.expect(Tok::Indent, "indented method block")?;
+            let mut methods = Vec::new();
+            while !self.at(Tok::Dedent) && !self.at(Tok::Eof) {
+                self.skip_newlines();
+                if self.at(Tok::Dedent) || self.at(Tok::Eof) {
+                    break;
+                }
+                methods.push(self.fn_decl()?);
+                self.skip_newlines();
+            }
+            let end = self.peek().span.start;
+            self.expect(Tok::Dedent, "dedent")?;
+            return Ok(Item::ImplTrait(ImplTraitBlock {
+                trait_name: first_name,
+                target,
+                methods,
+                span: Span::new(start, end),
+            }));
+        }
+        // plain `impl <Type>:`
+        let target = first_name;
         self.expect(Tok::Colon, "`:`")?;
         self.expect(Tok::Newline, "newline")?;
         self.skip_newlines();
@@ -217,10 +252,126 @@ impl Parser {
         }
         let end = self.peek().span.start;
         self.expect(Tok::Dedent, "dedent")?;
-        Ok(ImplBlock {
+        Ok(Item::Impl(ImplBlock {
             target,
             methods,
             span: Span::new(start, end),
+        }))
+    }
+
+    /// trait <Name>:
+    ///     fn sig(self, ...) -> T   # required (no body)
+    ///     fn meth(self, ...) -> T: # default-impl (with body)
+    ///         <stmts>
+    fn trait_decl(&mut self) -> Result<TraitDecl, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Trait, "`trait`")?;
+        let name_tok = self.expect(Tok::Ident("".into()), "trait name")?;
+        let name = match name_tok.tok {
+            Tok::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        self.expect(Tok::Colon, "`:`")?;
+        self.expect(Tok::Newline, "newline")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented trait body")?;
+        let mut methods = Vec::new();
+        while !self.at(Tok::Dedent) && !self.at(Tok::Eof) {
+            self.skip_newlines();
+            if self.at(Tok::Dedent) || self.at(Tok::Eof) {
+                break;
+            }
+            methods.push(self.trait_method()?);
+            self.skip_newlines();
+        }
+        let end = self.peek().span.start;
+        self.expect(Tok::Dedent, "dedent")?;
+        Ok(TraitDecl {
+            name,
+            methods,
+            span: Span::new(start, end),
+        })
+    }
+
+    /// Parses either:
+    ///   `fn name(params) -> T ! E`          (signature only, no body)
+    ///   `fn name(params) -> T ! E:` + body  (default implementation)
+    fn trait_method(&mut self) -> Result<TraitMethod, LingoError> {
+        let start = self.peek().span.start;
+        self.expect(Tok::Fn, "`fn`")?;
+        let name_tok = self.expect(Tok::Ident("".into()), "method name")?;
+        let name = match name_tok.tok {
+            Tok::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        self.expect(Tok::LParen, "`(`")?;
+        let mut params = Vec::new();
+        if !self.at(Tok::RParen) {
+            if self.at(Tok::Self_) {
+                let s_tok = self.advance();
+                params.push(Param {
+                    name: "self".into(),
+                    ty: TypeRef { name: "Self".into(), type_args: Vec::new(), span: s_tok.span },
+                    span: s_tok.span,
+                });
+                if self.eat(Tok::Comma) {
+                    loop {
+                        params.push(self.param()?);
+                        if !self.eat(Tok::Comma) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                loop {
+                    params.push(self.param()?);
+                    if !self.eat(Tok::Comma) {
+                        break;
+                    }
+                }
+            }
+        }
+        self.expect(Tok::RParen, "`)`")?;
+        let return_type = if self.eat(Tok::Arrow) {
+            Some(self.type_ref()?)
+        } else {
+            None
+        };
+        let raises = if self.eat(Tok::Bang) {
+            Some(self.type_ref()?)
+        } else {
+            None
+        };
+        // signature-only ends at a newline; default-impl ends with `:` + block
+        if self.eat(Tok::Colon) {
+            let body = self.block()?;
+            let end = body.span.end;
+            return Ok(TraitMethod {
+                decl: FnDecl {
+                    name,
+                    params,
+                    return_type,
+                    raises,
+                    body,
+                    span: Span::new(start, end),
+                },
+                has_default: true,
+            });
+        }
+        // required (signature-only): consume the trailing newline
+        self.expect(Tok::Newline, "newline after trait method signature")?;
+        let end = self.peek().span.start;
+        Ok(TraitMethod {
+            decl: FnDecl {
+                name,
+                params,
+                return_type,
+                raises,
+                // empty placeholder body
+                body: Block { stmts: Vec::new(), span: Span::new(start, end) },
+                span: Span::new(start, end),
+            },
+            has_default: false,
         })
     }
 
