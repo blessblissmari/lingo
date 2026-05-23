@@ -1,0 +1,38 @@
+# v0.2.6: signature substitution.
+#
+# Trait method signatures can mention the trait's type params (`T`) and
+# the special `Self` name.  When checking conformance, the resolver
+# substitutes `T -> trait_args[i]` and `Self -> target` into the trait
+# method's sig, then matches it structurally against the impl method's
+# sig.  Typos in impl method signatures are now caught at resolve time
+# instead of silently miscompiling.
+
+trait Bag[T]:
+    fn put(self, v: T) -> Self
+    fn first(self) -> T
+
+struct IntBag:
+    head: int
+    has: bool
+
+struct StrBag:
+    head: str
+    has: bool
+
+impl Bag[int] for IntBag:
+    fn put(self, v: int) -> IntBag:
+        return IntBag{head: v, has: true}
+    fn first(self) -> int:
+        return self.head
+
+impl Bag[str] for StrBag:
+    fn put(self, v: str) -> StrBag:
+        return StrBag{head: v, has: true}
+    fn first(self) -> str:
+        return self.head
+
+fn main():
+    let a = IntBag{head: 0, has: false}.put(7)
+    let b = StrBag{head: "", has: false}.put("ada")
+    print(f"int bag first = {a.first()}")
+    print(f"str bag first = {b.first()}")

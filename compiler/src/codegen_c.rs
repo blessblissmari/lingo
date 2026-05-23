@@ -546,9 +546,26 @@ impl Codegen {
                             ));
                         }
                     }
+                    // v0.2.6: signature substitution check.  Build the
+                    // `type_params[i] -> trait_args[i]` + `Self -> target`
+                    // map, then walk each trait method's signature
+                    // through it and compare structurally to the impl
+                    // method's signature.  Default-impl methods (taken
+                    // straight from the trait body) don't get checked
+                    // — they're already self-consistent.
+                    let subst = crate::ast::build_trait_subst(
+                        &trait_decl.type_params,
+                        &b.trait_args,
+                        &b.target,
+                    );
                     let mut methods: Vec<FnDecl> = Vec::with_capacity(trait_decl.methods.len());
                     for tm in &trait_decl.methods {
                         if let Some(m) = impl_by_name.get(&tm.decl.name) {
+                            if let Err(msg) = crate::ast::check_trait_method_sig(
+                                &b.trait_name, &b.target, &tm.decl, m, &subst,
+                            ) {
+                                return Err(LingoError::new(Stage::Resolve, msg, m.span));
+                            }
                             methods.push(m.clone());
                         } else if tm.has_default {
                             methods.push(tm.decl.clone());

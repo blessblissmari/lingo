@@ -300,3 +300,155 @@ pub enum BinOp {
     And,
     Or,
 }
+
+// ---------------------------------------------------------------------
+// v0.2.6: trait-method signature substitution helpers
+// ---------------------------------------------------------------------
+//
+// When checking that an `impl Trait[A1, A2] for Target:` block conforms
+// to its trait declaration, we substitute the trait's declared type
+// parameters (and the special `Self` name) into each trait method's
+// signature before comparing it to the impl method's signature.
+//
+// Substitution map:
+//   trait_decl.type_params[i]  ->  impl_block.trait_args[i]
+//   "Self"                     ->  impl_block.target
+//
+// Comparison is structural over type names: `vec[int]` matches
+// `vec[int]`, `Opt[str]` matches `Opt[str]`, and so on.  Param *names*
+// can differ between trait and impl — only types matter.  The receiver
+// `self` parameter participates in this check too: a trait method
+// declares `self: Self`, and after `Self -> Target` substitution it
+// must match the impl method's `self: Self` (which the parser also
+// gives the placeholder name "Self" — the substitution covers both).
+
+/// Substitute every type name in `ty` that appears as a key in `subst`
+/// with the mapped concrete name.  Walks `type_args` recursively so
+/// `vec[T]` becomes `vec[int]` when `T -> int`.
+pub fn subst_typeref(ty: &TypeRef, subst: &std::collections::HashMap<String, String>) -> TypeRef {
+    let new_name = subst.get(&ty.name).cloned().unwrap_or_else(|| ty.name.clone());
+    TypeRef {
+        name: new_name,
+        type_args: ty.type_args.iter().map(|t| subst_typeref(t, subst)).collect(),
+        span: ty.span,
+    }
+}
+
+/// Structural equality over TypeRef by name (ignoring spans).
+pub fn typeref_eq(a: &TypeRef, b: &TypeRef) -> bool {
+    a.name == b.name
+        && a.type_args.len() == b.type_args.len()
+        && a.type_args.iter().zip(b.type_args.iter()).all(|(x, y)| typeref_eq(x, y))
+}
+
+/// Pretty-print a TypeRef for diagnostics (`vec[map[str, int]]`).
+pub fn typeref_display(ty: &TypeRef) -> String {
+    if ty.type_args.is_empty() {
+        ty.name.clone()
+    } else {
+        let inner: Vec<String> = ty.type_args.iter().map(typeref_display).collect();
+        format!("{}[{}]", ty.name, inner.join(", "))
+    }
+}
+
+/// Optional-TypeRef structural equality + display.
+pub fn typeref_opt_eq(a: &Option<TypeRef>, b: &Option<TypeRef>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => typeref_eq(x, y),
+        _ => false,
+    }
+}
+
+pub fn typeref_opt_display(a: &Option<TypeRef>) -> String {
+    match a {
+        None => "<none>".into(),
+        Some(t) => typeref_display(t),
+    }
+}
+
+/// Build the substitution map a `TraitDecl` / `ImplTraitBlock` pair
+/// induces.  Caller has already verified arity (`trait_args.len() ==
+/// type_params.len()`).  Includes the implicit `"Self" -> target`
+/// mapping.  Returned map is keyed/valued by owned String so it can
+/// outlive the borrow on `trait_decl`.
+pub fn build_trait_subst(
+    type_params: &[String],
+    trait_args: &[String],
+    target: &str,
+) -> std::collections::HashMap<String, String> {
+    debug_assert_eq!(type_params.len(), trait_args.len());
+    let mut m = std::collections::HashMap::new();
+    for (p, a) in type_params.iter().zip(trait_args.iter()) {
+        m.insert(p.clone(), a.clone());
+    }
+    m.insert("Self".to_string(), target.to_string());
+    m
+}
+
+/// Check that `impl_fn`'s signature matches `trait_fn`'s after
+/// substitution.  Returns the offending diagnostic string on
+/// mismatch — the caller wraps it in a `LingoError` with the proper
+/// span (impl method's span is the most useful pointer).
+pub fn check_trait_method_sig(
+    trait_name: &str,
+    target: &str,
+    trait_fn: &FnDecl,
+    impl_fn: &FnDecl,
+    subst: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    // arity
+    if trait_fn.params.len() != impl_fn.params.len() {
+        return Err(format!(
+            "method `{tn}.{m}` for `{tgt}`: trait declares {n} parameter(s), impl provides {k}",
+            tn = trait_name, m = impl_fn.name, tgt = target,
+            n = trait_fn.params.len(), k = impl_fn.params.len()
+        ));
+    }
+    // v0.2.6: the parser also gives the impl method's `self` parameter
+    // the placeholder type name "Self".  We resolve that to the
+    // concrete target on the impl side before comparing, using a
+    // single-entry map (so `T` etc. on the impl side stay as written
+    // — they're just regular type names from the impl's POV).
+    let mut impl_subst: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    impl_subst.insert("Self".into(), target.to_string());
+
+    // per-param types
+    for (tp, ip) in trait_fn.params.iter().zip(impl_fn.params.iter()) {
+        let expected = subst_typeref(&tp.ty, subst);
+        let actual = subst_typeref(&ip.ty, &impl_subst);
+        if !typeref_eq(&expected, &actual) {
+            return Err(format!(
+                "method `{tn}.{m}` for `{tgt}`: parameter `{pname}` expected `{exp}`, got `{got}`",
+                tn = trait_name, m = impl_fn.name, tgt = target,
+                pname = ip.name,
+                exp = typeref_display(&expected),
+                got = typeref_display(&actual),
+            ));
+        }
+    }
+    // return type
+    let expected_ret = trait_fn.return_type.as_ref().map(|t| subst_typeref(t, subst));
+    let actual_ret = impl_fn.return_type.as_ref().map(|t| subst_typeref(t, &impl_subst));
+    if !typeref_opt_eq(&expected_ret, &actual_ret) {
+        return Err(format!(
+            "method `{tn}.{m}` for `{tgt}`: return type expected `{exp}`, got `{got}`",
+            tn = trait_name, m = impl_fn.name, tgt = target,
+            exp = typeref_opt_display(&expected_ret),
+            got = typeref_opt_display(&actual_ret),
+        ));
+    }
+    // raises clause (`! E`)
+    let expected_raises = trait_fn.raises.as_ref().map(|t| subst_typeref(t, subst));
+    let actual_raises = impl_fn.raises.as_ref().map(|t| subst_typeref(t, &impl_subst));
+    if !typeref_opt_eq(&expected_raises, &actual_raises) {
+        return Err(format!(
+            "method `{tn}.{m}` for `{tgt}`: raises clause expected `{exp}`, got `{got}`",
+            tn = trait_name, m = impl_fn.name, tgt = target,
+            exp = typeref_opt_display(&expected_raises),
+            got = typeref_opt_display(&actual_raises),
+        ));
+    }
+    Ok(())
+}

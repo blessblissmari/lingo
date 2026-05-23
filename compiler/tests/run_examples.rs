@@ -777,6 +777,67 @@ fn c_backend_generic_trait_native() {
 }
 
 #[test]
+fn generic_trait_sig_interp() {
+    // v0.2.6: trait method sig uses `T` + `Self`, impl spells out
+    // the concrete types — substitution makes it line up.
+    let (stdout, stderr, code) = run("generic_trait_sig.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "int bag first = 7\nstr bag first = ada\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_generic_trait_sig_native() {
+    // v0.2.6: same example through the C backend — still byte-
+    // identical to interp.
+    let Some((stdout, stderr, code)) = run_native("generic_trait_sig.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("generic_trait_sig.lingo");
+    assert_eq!(stdout, interp_out, "native generic_trait_sig drifted from interp");
+}
+
+fn run_source(src: &str, filename: &str) -> (String, String, i32) {
+    use std::process::Command;
+    let p = std::env::temp_dir().join(filename);
+    std::fs::write(&p, src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_lingo")).arg(&p).output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn generic_trait_sig_param_type_mismatch() {
+    // v0.2.6: typo in impl method's parameter type is caught at
+    // resolve time with a precise expected/got diagnostic.
+    let src = "trait Encoder[T]:\n    fn encode(self, v: T) -> str\n\nstruct IntEnc:\n    pad: int\n\nimpl Encoder[int] for IntEnc:\n    fn encode(self, v: str) -> str:\n        return \"oops\"\n\nfn main():\n    print(\"hi\")\n";
+    let (_, stderr, code) = run_source(src, "lingo_v026_sig_param.lingo");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("parameter `v` expected `int`, got `str`"),
+            "expected param-type diagnostic, got: {stderr}");
+}
+
+#[test]
+fn generic_trait_sig_return_type_mismatch() {
+    let src = "trait Encoder[T]:\n    fn encode(self, v: T) -> str\n\nstruct IntEnc:\n    pad: int\n\nimpl Encoder[int] for IntEnc:\n    fn encode(self, v: int) -> int:\n        return 0\n\nfn main():\n    print(\"hi\")\n";
+    let (_, stderr, code) = run_source(src, "lingo_v026_sig_ret.lingo");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("return type expected `str`, got `int`"),
+            "expected return-type diagnostic, got: {stderr}");
+}
+
+#[test]
+fn generic_trait_sig_raises_mismatch() {
+    let src = "trait Parse[E]:\n    fn parse(self, s: str) -> int ! E\n\nstruct P:\n    n: int\n\nimpl Parse[str] for P:\n    fn parse(self, s: str) -> int ! int:\n        return 0\n\nfn main():\n    print(\"hi\")\n";
+    let (_, stderr, code) = run_source(src, "lingo_v026_sig_raises.lingo");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("raises clause expected `str`, got `int`"),
+            "expected raises-clause diagnostic, got: {stderr}");
+}
+
+#[test]
 fn generic_trait_arity_mismatch_too_few() {
     // v0.2.5: clear diagnostic when a generic trait's bracket arity
     // doesn't match the impl.  Smoke-test only — running the source
