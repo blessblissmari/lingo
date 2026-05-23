@@ -1,0 +1,117 @@
+// lingo grammar sketch — v0.1
+// indent-sensitive, parsed with an INDENT/DEDENT lexer like python.
+// this is a *sketch*, not a finished spec. the parser in `compiler/` is
+// the source of truth once it exists.
+
+File          ::= TopDecl*
+
+TopDecl       ::= UseDecl | ConstDecl | FnDecl | StructDecl | EnumDecl
+                | TraitDecl | ImplDecl | TypeAlias
+
+UseDecl       ::= "use" Path ("." "{" Ident ("," Ident)* "}")? NEWLINE
+
+ConstDecl     ::= "const" Ident (":" Type)? "=" Expr NEWLINE
+
+FnDecl        ::= "fn" Ident GenericParams? "(" ParamList? ")"
+                  ("->" Type)? ErrorClause? ":" Block
+
+GenericParams ::= "[" Ident ("," Ident)* "]"
+
+ParamList     ::= Param ("," Param)*
+Param         ::= Ident ":" Type
+ErrorClause   ::= "!" Type
+
+StructDecl    ::= "struct" Ident GenericParams? ":" INDENT FieldDecl+ DEDENT
+FieldDecl     ::= Ident ":" Type NEWLINE
+
+EnumDecl      ::= "enum" Ident GenericParams? ":" INDENT EnumVariant+ DEDENT
+EnumVariant   ::= Ident ("(" TypeList ")")? NEWLINE
+
+TraitDecl     ::= "trait" Ident GenericParams? ":" INDENT TraitItem+ DEDENT
+TraitItem     ::= FnSig NEWLINE | FnDecl
+
+ImplDecl      ::= "impl" GenericParams? Type ("for" Type)? ":" INDENT FnDecl+ DEDENT
+
+TypeAlias     ::= "type" Ident GenericParams? "=" Type NEWLINE
+
+Type          ::= "&" "mut"? Type
+                | "[" Type ";" Expr "]"
+                | "[" Type "]"
+                | "(" TypeList ")"
+                | Ident ("[" TypeList "]")?
+                | Path
+
+TypeList      ::= Type ("," Type)*
+
+Block         ::= INDENT Stmt+ DEDENT
+
+Stmt          ::= LetStmt | ReturnStmt | IfStmt | ForStmt | MatchStmt
+                | WithStmt | DeferStmt | BreakStmt | ContinueStmt
+                | ExprStmt
+
+LetStmt       ::= "let" "mut"? Ident (":" Type)? "=" Expr NEWLINE
+ReturnStmt    ::= "return" Expr? NEWLINE
+IfStmt        ::= "if" Expr ":" Block ("elif" Expr ":" Block)* ("else" ":" Block)?
+ForStmt       ::= "for" Pattern "in" Expr ":" Block
+MatchStmt     ::= "match" Expr ":" INDENT MatchArm+ DEDENT
+MatchArm      ::= Pattern ":" (Stmt | INDENT Stmt+ DEDENT)
+WithStmt      ::= "with" Expr ("as" Ident)? ":" Block
+DeferStmt     ::= "defer" Expr NEWLINE
+BreakStmt     ::= "break" Label? NEWLINE
+ContinueStmt  ::= "continue" Label? NEWLINE
+ExprStmt      ::= Expr NEWLINE
+
+Label         ::= ":" Ident
+
+Pattern       ::= Ident
+                | "_"
+                | Literal
+                | Path ("(" Pattern ("," Pattern)* ")")?
+                | "(" Pattern ("," Pattern)* ")"
+
+Expr          ::= AssignExpr
+AssignExpr    ::= OrExpr (AssignOp Expr)?
+AssignOp      ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
+OrExpr        ::= AndExpr ("or" AndExpr)*
+AndExpr       ::= NotExpr ("and" NotExpr)*
+NotExpr       ::= "not" NotExpr | CmpExpr
+CmpExpr       ::= RangeExpr ((CmpOp RangeExpr))?
+CmpOp         ::= "==" | "!=" | "<" | "<=" | ">" | ">=" | "<=>"
+RangeExpr     ::= AddExpr (".." AddExpr)?
+AddExpr       ::= MulExpr (("+"|"-") MulExpr)*
+MulExpr       ::= AsExpr (("*"|"/"|"%") AsExpr)*
+AsExpr        ::= PowExpr ("as" Type)?
+PowExpr       ::= UnaryExpr ("**" UnaryExpr)?
+UnaryExpr     ::= ("-" | "&" | "&" "mut") UnaryExpr | PostfixExpr
+PostfixExpr   ::= Primary (CallSuffix | IndexSuffix | FieldSuffix | TrySuffix)*
+CallSuffix    ::= "(" ArgList? ")"
+IndexSuffix   ::= "[" Expr "]"
+FieldSuffix   ::= "." Ident
+TrySuffix     ::= "?"
+ArgList       ::= Arg ("," Arg)*
+Arg           ::= (Ident ":")? Expr           // ident: makes it a keyword arg
+
+Primary       ::= Literal | Ident | Path
+                | "(" Expr ")" | TupleLit | StructLit
+                | ArrayLit | VecLit | MapLit | SetLit
+                | ClosureLit | IfExpr | MatchExpr
+
+ClosureLit    ::= "|" ParamList? "|" (Expr | Block)
+IfExpr        ::= "if" Expr "then" Expr "else" Expr
+MatchExpr     ::= "match" Expr ":" INDENT MatchArm+ DEDENT
+StructLit     ::= Path "{" (Ident ":" Expr ("," Ident ":" Expr)*)? "}"
+ArrayLit      ::= "[" (Expr ("," Expr)*)? "]"
+VecLit        ::= "vec" "[" (Expr ("," Expr)*)? "]"
+MapLit        ::= "map" "{" (Expr ":" Expr ("," Expr ":" Expr)*)? "}"
+SetLit        ::= "set" "{" (Expr ("," Expr)*)? "}"
+TupleLit      ::= "(" Expr "," (Expr ("," Expr)*)? ")"
+Literal       ::= IntLit | FloatLit | StringLit | FStringLit | CharLit
+                | BoolLit | NoneLit
+
+Path          ::= Ident ("." Ident)*
+
+// keywords (reserved, can't be used as identifiers):
+// and as box break comptime const continue defer dyn elif else
+// enum err false fn for forever if impl in let match mod mut none
+// not ok option or result return self set some str string struct
+// then trait true type use vec while with
