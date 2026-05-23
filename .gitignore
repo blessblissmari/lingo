@@ -1,0 +1,21 @@
+# build artifacts
+/target/
+/build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# rust bootstrap compiler
+/compiler/target/
+
+# editor
+.vscode/
+.idea/
+*.swp
+
+# os
+.DS_Store
+Thumbs.db
