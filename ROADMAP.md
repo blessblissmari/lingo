@@ -29,6 +29,7 @@
 - [x] **utf-8 in string literals** (lexer copies full codepoints, not bytes)
 - [x] **io builtins** `read_file`, `write_file`, `args()`, `int(s)`, `str(x)` — all return `T ! str` where fallible
 - [x] **traits + impl-trait blocks** with required signatures, default-impl methods, and conformance checks
+- [x] **C backend MVP** (`lingo build foo.lingo` → native binary via gcc). Subset: fn / if / for-range / arithmetic / print / recursion. fib(35): native 22ms vs interpreter 51s (~2300×).
 - [ ] auto-wrap `?` via a `From<E>` trait (needs generic trait params first)
 - [ ] name resolution + scope analysis as a separate pass (today it's inline)
 - [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
