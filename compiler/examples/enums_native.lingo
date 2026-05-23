@@ -1,0 +1,28 @@
+# enums + match — all the way down to native code via the C backend.
+# Cell is a tiny tagged-union: empty / wall / pebble carrying an i64.
+
+enum Cell:
+    Empty
+    Wall
+    Pebble(i64)
+
+fn describe(c: Cell) -> str:
+    match c:
+        Cell.Empty:
+            return "empty"
+        Cell.Wall:
+            return "wall"
+        Cell.Pebble(n):
+            if n > 1:
+                return "many pebbles"
+            return "one pebble"
+
+fn main():
+    let a = Cell.Empty
+    let b = Cell.Wall
+    let c = Cell.Pebble(1)
+    let d = Cell.Pebble(42)
+    print(describe(a))
+    print(describe(b))
+    print(describe(c))
+    print(describe(d))
