@@ -55,6 +55,11 @@ enum CType {
     /// instead of doing full monomorphization.  Once generics land we'll
     /// collapse those down to a single template.
     Vec(Box<CType>),
+    /// `map[K, V]` — v0.1.15 only supports `map[str, i64]`.  Internally a
+    /// growable parallel-array (linear scan) backed by realloc.  Once we
+    /// have an allocator + monomorphization this becomes a real open-addressing
+    /// hash table with the right hashing per key type.
+    Map(Box<CType>, Box<CType>),
 }
 
 impl CType {
@@ -76,6 +81,10 @@ impl CType {
                 // hitting this branch means the compiler has a bug.
                 other => panic!("unsupported vec element type in codegen: {:?}", other),
             },
+            CType::Map(k, v) => match (k.as_ref(), v.as_ref()) {
+                (CType::Str, CType::I64) => "lingo_map_str_i64_t".into(),
+                other => panic!("unsupported map key/value types in codegen: {:?}", other),
+            },
         }
     }
 
@@ -93,6 +102,7 @@ impl CType {
             CType::Struct(_) => "<struct>", // not directly printable yet
             CType::Enum(_) => "<enum>",     // not directly printable yet
             CType::Vec(_) => "<vec>",        // printed via emit_print special-case
+            CType::Map(_, _) => "<map>",     // not directly printable yet
         }
     }
 }
@@ -127,6 +137,28 @@ fn map_type_with(
             )),
         }
         return Ok(CType::Vec(Box::new(inner)));
+    }
+    if t.name == "map" {
+        // v0.1.15: only `map[str, i64]`.  General-purpose maps wait on
+        // monomorphization (we'd otherwise need a key-hashing template).
+        if t.type_args.len() != 2 {
+            return Err(LingoError::new(
+                Stage::Resolve,
+                "C backend: `map` needs two type arguments, e.g. `map[str, i64]`",
+                span,
+            ));
+        }
+        let k = map_type_with(&t.type_args[0], span, structs, enums)?;
+        let v = map_type_with(&t.type_args[1], span, structs, enums)?;
+        if !(k == CType::Str && v == CType::I64) {
+            return Err(LingoError::new(
+                Stage::Resolve,
+                format!("C backend: only `map[str, i64]` is supported in v0.1.15 (got `map[{}, {}]`)",
+                        k.c_decl(), v.c_decl()),
+                span,
+            ));
+        }
+        return Ok(CType::Map(Box::new(k), Box::new(v)));
     }
     if !t.type_args.is_empty() {
         return Err(LingoError::new(
@@ -383,7 +415,8 @@ impl Codegen {
         // realloc, without changing the public API (`len`/`get`).
         out.push_str("typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\n");
         out.push_str("typedef struct { const double*  data; int64_t len; } lingo_vec_f64_t;\n");
-        out.push_str("typedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\n\n");
+        out.push_str("typedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\n");
+        out.push_str("typedef struct { const char** keys; int64_t* vals; int64_t len; int64_t cap; } lingo_map_str_i64_t;\n\n");
         if !self.type_defs.is_empty() {
             out.push_str(&self.type_defs);
         }
@@ -1106,6 +1139,29 @@ impl Codegen {
                     CType::Str,
                 )
             }
+            ExprKind::MapLit(entries) => {
+                // v0.1.15 restriction: only the empty `map{}` literal is
+                // an expression — non-empty literals would need either GCC
+                // statement-expressions or a multi-statement initializer
+                // form, which we'll add once we have a typechecker.  In the
+                // meantime, populate via repeated `.set(k, v)` calls.
+                if !entries.is_empty() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: non-empty `map{...}` literals not supported yet \
+                         (build the map with `.set(k, v)` calls; v0.1.16+)",
+                        e.span,
+                    ));
+                }
+                // Default to `map[str, i64]` for now — once we have type
+                // inference / annotations, we'll plumb the expected type
+                // through here.  Users who want a different shape annotate
+                // the binding: `let mut m: map[str, i64] = map{}`.
+                (
+                    "lingo_map_str_i64_new()".to_string(),
+                    CType::Map(Box::new(CType::Str), Box::new(CType::I64)),
+                )
+            }
             ExprKind::VecLit(items) => {
                 // Lowers to a C99 compound literal:
                 //   ((lingo_vec_<T>_t){ .data = (<C-T>[]){ a, b, c }, .len = N })
@@ -1375,6 +1431,106 @@ impl Codegen {
         }
     }
 
+    /// Built-in methods on `map[str, i64]`.  v0.1.15 subset:
+    ///   - `m.len()`        -> i64
+    ///   - `m.has(k)`       -> bool
+    ///   - `m.get(k)`       -> i64   (returns 0 if missing; native quirk!
+    ///                                 interp returns `none`.  Always `has`-
+    ///                                 check first if you need to distinguish.)
+    ///   - `m.set(k, v)`    -> void  (mutates — receiver must be an addressable lvalue)
+    ///   - `m.keys()`       -> vec[str]
+    ///
+    /// `recv_kind` tells us whether the receiver was a plain identifier
+    /// (and thus addressable), which we need for mutating methods.
+    fn gen_map_method(
+        &mut self,
+        recv: &Expr,
+        recv_code: &str,
+        method: &str,
+        args: &[Arg],
+        span: Span,
+    ) -> Result<(String, CType), LingoError> {
+        // For `m.set(...)` we need `&m`, i.e. the receiver must be an
+        // addressable lvalue.  v0.1.15 only allows a plain identifier.
+        let recv_ident = if let ExprKind::Ident(name) = &recv.kind {
+            Some(name.clone())
+        } else {
+            None
+        };
+        let need_str_arg = |this: &mut Self, n: usize| -> Result<String, LingoError> {
+            let a = &args[n];
+            if a.name.is_some() {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("C backend: `map.{}` takes positional args", method),
+                    a.span,
+                ));
+            }
+            let (c, t) = this.gen_expr(&a.value)?;
+            if t != CType::Str {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("C backend: `map.{}` key must be str, got `{}`", method, t.c_decl()),
+                    a.span,
+                ));
+            }
+            Ok(c)
+        };
+        let need_i64_arg = |this: &mut Self, n: usize| -> Result<String, LingoError> {
+            let a = &args[n];
+            if a.name.is_some() {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("C backend: `map.{}` takes positional args", method),
+                    a.span,
+                ));
+            }
+            let (c, t) = this.gen_expr(&a.value)?;
+            if t != CType::I64 {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("C backend: `map.{}` value must be i64, got `{}`", method, t.c_decl()),
+                    a.span,
+                ));
+            }
+            Ok(c)
+        };
+        match (method, args.len()) {
+            ("len", 0) => Ok((format!("({}).len", recv_code), CType::I64)),
+            ("has", 1) => {
+                let k = need_str_arg(self, 0)?;
+                Ok((format!("lingo_map_str_i64_has(&({}), {})", recv_code, k), CType::Bool))
+            }
+            ("get", 1) => {
+                let k = need_str_arg(self, 0)?;
+                Ok((format!("lingo_map_str_i64_get(&({}), {})", recv_code, k), CType::I64))
+            }
+            ("set", 2) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `map.set` receiver must be a plain variable (v0.1.15)",
+                    recv.span,
+                ))?;
+                let k = need_str_arg(self, 0)?;
+                let v = need_i64_arg(self, 1)?;
+                // Emit as a statement so we can return void.
+                writeln!(self.body, "{}lingo_map_str_i64_set(&{}, {}, {});",
+                         self.pad(), ident, k, v).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
+            ("keys", 0) => Ok((
+                format!("lingo_map_str_i64_keys(&({}))", recv_code),
+                CType::Vec(Box::new(CType::Str)),
+            )),
+            (m, n) => Err(LingoError::new(
+                Stage::Resolve,
+                format!("C backend: `map.{}` with {} arg(s) is not supported yet \
+                         (have: len/0, has/1, get/1, set/2, keys/0)", m, n),
+                span,
+            )),
+        }
+    }
+
     /// Built-in methods on `vec[T]` for T ∈ {i64, f64, str}.  Subset for v0.1.14:
     ///   - `v.len()`     -> `(v).len`              : i64
     ///   - `v.get(i)`    -> `(v).data[i]`          : T   (no bounds check yet)
@@ -1445,6 +1601,9 @@ impl Codegen {
                     let probe = self.gen_expr(receiver)?;
                     if matches!(probe.1, CType::Vec(_)) {
                         return self.gen_vec_method(&probe.0, &probe.1, method, args, span);
+                    }
+                    if matches!(probe.1, CType::Map(_, _)) {
+                        return self.gen_map_method(receiver, &probe.0, method, args, span);
                     }
                     if probe.1 == CType::Str {
                         return self.gen_str_method(&probe.0, method, args, span);
@@ -1596,6 +1755,7 @@ fn debug_fmt_for(t: &CType) -> String {
         CType::Struct(_) => "<struct>".into(),
         CType::Enum(_) => "<enum>".into(),
         CType::Vec(_) => "<vec>".into(),
+        CType::Map(_, _) => "<map>".into(),
     }
 }
 
@@ -1704,6 +1864,54 @@ static lingo_vec_str_t lingo_str_split(const char* s, const char* sep) {
     return (lingo_vec_str_t){ .data = arr, .len = (int64_t)count };
 }
 
+/* === map[str, i64] runtime (v0.1.15) ===
+ * Linear-scan growable map.  Keys aren't copied — caller must keep them alive
+ * (which is fine: keys typically come from string literals or already-malloc'd
+ * pieces from `lingo_str_split` / `lingo_str_concat`).  Will swap for a real
+ * open-addressing hash table once we have a typed `hash(K)` story. */
+__attribute__((unused))
+static lingo_map_str_i64_t lingo_map_str_i64_new(void) {
+    lingo_map_str_i64_t m = { NULL, NULL, 0, 0 };
+    return m;
+}
+__attribute__((unused))
+static bool lingo_map_str_i64_has(const lingo_map_str_i64_t* m, const char* k) {
+    for (int64_t i = 0; i < m->len; i++) {
+        if (strcmp(m->keys[i], k) == 0) return true;
+    }
+    return false;
+}
+__attribute__((unused))
+static int64_t lingo_map_str_i64_get(const lingo_map_str_i64_t* m, const char* k) {
+    for (int64_t i = 0; i < m->len; i++) {
+        if (strcmp(m->keys[i], k) == 0) return m->vals[i];
+    }
+    return 0; /* missing key returns 0 — has()-check first if you need to distinguish */
+}
+__attribute__((unused))
+static void lingo_map_str_i64_set(lingo_map_str_i64_t* m, const char* k, int64_t v) {
+    for (int64_t i = 0; i < m->len; i++) {
+        if (strcmp(m->keys[i], k) == 0) { m->vals[i] = v; return; }
+    }
+    if (m->len == m->cap) {
+        int64_t newcap = m->cap == 0 ? 4 : m->cap * 2;
+        m->keys = (const char**)realloc((void*)m->keys, (size_t)newcap * sizeof(const char*));
+        m->vals = (int64_t*)realloc((void*)m->vals, (size_t)newcap * sizeof(int64_t));
+        if (!m->keys || !m->vals) { fprintf(stderr, \"lingo: oom in map_set\\n\"); exit(1); }
+        m->cap = newcap;
+    }
+    m->keys[m->len] = k;
+    m->vals[m->len] = v;
+    m->len++;
+}
+__attribute__((unused))
+static lingo_vec_str_t lingo_map_str_i64_keys(const lingo_map_str_i64_t* m) {
+    const char** arr = (const char**)malloc((size_t)m->len * sizeof(const char*));
+    if (!arr && m->len > 0) { fprintf(stderr, \"lingo: oom in map_keys\\n\"); exit(1); }
+    for (int64_t i = 0; i < m->len; i++) arr[i] = m->keys[i];
+    return (lingo_vec_str_t){ .data = arr, .len = m->len };
+}
+
 /* Two-pass snprintf into a fresh heap buffer.  Returned `const char*` leaks
  * on purpose (see note above).  Used by the f-string lowering. */
 __attribute__((unused))
@@ -1733,7 +1941,7 @@ static const char* lingo_fmt_alloc(const char* fmt, ...) {
     // Marker is the chunk at the *end* of the prelude block, right after which
     // the helper splice goes — and crucially, the splice goes *after* the
     // `lingo_vec_<T>_t` typedefs (because the helpers reference them).
-    let marker = "typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\ntypedef struct { const double*  data; int64_t len; } lingo_vec_f64_t;\ntypedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\n\n";
+    let marker = "typedef struct { const int64_t* data; int64_t len; } lingo_vec_i64_t;\ntypedef struct { const double*  data; int64_t len; } lingo_vec_f64_t;\ntypedef struct { const char**   data; int64_t len; } lingo_vec_str_t;\ntypedef struct { const char** keys; int64_t* vals; int64_t len; int64_t cap; } lingo_map_str_i64_t;\n\n";
     Ok(match core.find(marker) {
         Some(idx) => {
             let split = idx + marker.len();
