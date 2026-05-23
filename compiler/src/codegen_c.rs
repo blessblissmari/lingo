@@ -321,6 +321,10 @@ pub struct Codegen {
     /// `Stmt::Return`, `Stmt::Raise`, and `Try` to wrap/propagate the
     /// `lingo_result_..._t` value correctly.
     current_fn_raises: Option<(CType, CType)>,
+    /// v0.1.24: backwards-inferred element types for `let mut x = vec[]`
+    /// lets without an annotation, populated by a per-fn pre-pass over the
+    /// function body that looks at later `x.push(e)` calls.
+    inferred_empty_vec_types: HashMap<String, CType>,
 }
 
 impl Codegen {
@@ -338,6 +342,7 @@ impl Codegen {
             tmp_counter: 0,
             result_pairs: std::collections::BTreeSet::new(),
             current_fn_raises: None,
+            inferred_empty_vec_types: HashMap::new(),
         }
     }
 
@@ -702,6 +707,159 @@ impl Codegen {
         Ok(s)
     }
 
+    /// v0.1.24: very small AST inference helper used to back-fill the
+    /// element type of `let mut x = vec[]` lets with no annotation by
+    /// peeking at the first `x.push(e)` call inside the same function.
+    /// Returns `None` for any expression we can't trivially type.
+    fn ast_infer_ty(&self, e: &Expr, vars: &HashMap<String, CType>) -> Option<CType> {
+        match &e.kind {
+            ExprKind::Int(_) => Some(CType::I64),
+            ExprKind::Float(_) => Some(CType::F64),
+            ExprKind::Bool(_) => Some(CType::Bool),
+            ExprKind::Str(_) => Some(CType::Str),
+            ExprKind::Ident(name) => vars.get(name).cloned(),
+            ExprKind::Field(recv, fname) => {
+                let rty = self.ast_infer_ty(recv, vars)?;
+                if let CType::Struct(sname) = rty {
+                    let fields = self.structs.get(&sname)?;
+                    return fields.iter().find(|(n, _)| n == fname).map(|(_, t)| t.clone());
+                }
+                None
+            }
+            ExprKind::Call(callee, _) => {
+                match &callee.kind {
+                    ExprKind::Ident(fname) => {
+                        if let Some((_, ret)) = self.fn_sigs.get(fname) {
+                            return Some(ret.clone());
+                        }
+                        // Type casts as fns: int / float / str / bool.
+                        match fname.as_str() {
+                            "int" => Some(CType::I64),
+                            "float" => Some(CType::F64),
+                            "str" => Some(CType::Str),
+                            "bool" => Some(CType::Bool),
+                            _ => None,
+                        }
+                    }
+                    ExprKind::Field(recv, method) => {
+                        let rty = self.ast_infer_ty(recv, vars)?;
+                        // Tiny method dispatch — covers what's needed for the
+                        // empty-vec inference pre-pass.  Failures fall through.
+                        match (&rty, method.as_str()) {
+                            (CType::Str, "trim") => Some(CType::Str),
+                            (CType::Str, "to_upper") => Some(CType::Str),
+                            (CType::Str, "to_lower") => Some(CType::Str),
+                            (CType::Str, "len") => Some(CType::I64),
+                            (CType::Str, "split") => Some(CType::Vec(Box::new(CType::Str))),
+                            (CType::Str, "concat") => Some(CType::Str),
+                            (CType::Vec(inner), "get") => Some((**inner).clone()),
+                            (CType::Vec(_), "len") => Some(CType::I64),
+                            (CType::Vec(_), "contains") => Some(CType::Bool),
+                            (CType::Vec(inner), "pop") => Some((**inner).clone()),
+                            (CType::Map(_, v), "get") => Some((**v).clone()),
+                            (CType::Map(_, _), "len") => Some(CType::I64),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            ExprKind::StructLit { name, .. } => Some(CType::Struct(name.clone())),
+            ExprKind::FString(_) => Some(CType::Str),
+            _ => None,
+        }
+    }
+
+    /// Recursively scan stmts to find every `let [mut] name = vec[]` with
+    /// no annotation, collecting the variable names into `out`.
+    fn collect_empty_vec_targets(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        for s in stmts {
+            match s {
+                Stmt::Let { name, ty: None, value, is_mut: _, span: _ } => {
+                    if matches!(&value.kind, ExprKind::VecLit(items) if items.is_empty()) {
+                        out.insert(name.clone());
+                    }
+                }
+                Stmt::For { body, .. } => Self::collect_empty_vec_targets(&body.stmts, out),
+                Stmt::If { arms, else_block, .. } => {
+                    for (_, b) in arms { Self::collect_empty_vec_targets(&b.stmts, out); }
+                    if let Some(b) = else_block { Self::collect_empty_vec_targets(&b.stmts, out); }
+                }
+                Stmt::Match { arms, .. } => {
+                    for arm in arms { Self::collect_empty_vec_targets(&arm.body.stmts, out); }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Walk a block tracking a local type environment.  When we see
+    /// `name.push(e)` and `name` is in `targets`, infer `e`'s type and
+    /// remember it in `pending`.  Handles for-loops by binding the iter
+    /// variable to the inferred element type for the duration of the body.
+    fn scan_for_empty_vec_pushes(
+        &self,
+        stmts: &[Stmt],
+        targets: &std::collections::HashSet<String>,
+        pending: &mut HashMap<String, CType>,
+        vars: &mut HashMap<String, CType>,
+    ) {
+        for s in stmts {
+            match s {
+                Stmt::Let { name, ty, value, span, is_mut: _ } => {
+                    if let Some(t) = ty {
+                        if let Ok(t) = map_type_with(t, *span, Some(&self.structs), Some(&self.enums)) {
+                            vars.insert(name.clone(), t);
+                        }
+                    } else if let Some(t) = self.ast_infer_ty(value, vars) {
+                        vars.insert(name.clone(), t);
+                    }
+                }
+                Stmt::For { var, iter, body, .. } => {
+                    let iter_ty = self.ast_infer_ty(iter, vars);
+                    let bind_ty = match &iter_ty {
+                        Some(CType::Vec(inner)) => Some((**inner).clone()),
+                        Some(CType::Str) => Some(CType::Str),
+                        _ => None,
+                    };
+                    let saved = vars.get(var).cloned();
+                    if let Some(t) = bind_ty.clone() {
+                        vars.insert(var.clone(), t);
+                    }
+                    self.scan_for_empty_vec_pushes(&body.stmts, targets, pending, vars);
+                    match saved {
+                        Some(t) => { vars.insert(var.clone(), t); }
+                        None if bind_ty.is_some() => { vars.remove(var); }
+                        _ => {}
+                    }
+                }
+                Stmt::If { arms, else_block, .. } => {
+                    for (_, b) in arms { self.scan_for_empty_vec_pushes(&b.stmts, targets, pending, vars); }
+                    if let Some(b) = else_block { self.scan_for_empty_vec_pushes(&b.stmts, targets, pending, vars); }
+                }
+                Stmt::Match { arms, .. } => {
+                    for arm in arms { self.scan_for_empty_vec_pushes(&arm.body.stmts, targets, pending, vars); }
+                }
+                Stmt::Expr(e) => {
+                    if let ExprKind::Call(callee, args) = &e.kind {
+                        if let ExprKind::Field(recv, method) = &callee.kind {
+                            if method == "push" && args.len() == 1 {
+                                if let ExprKind::Ident(target) = &recv.kind {
+                                    if targets.contains(target) && !pending.contains_key(target) {
+                                        if let Some(t) = self.ast_infer_ty(&args[0].value, vars) {
+                                            pending.insert(target.clone(), t);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn emit_fn_body(
         &mut self,
         c_name: &str,
@@ -723,6 +881,22 @@ impl Codegen {
         } else {
             None
         };
+        // v0.1.24: pre-pass — back-fill element types for `let x = vec[]`
+        // lets that have no annotation by looking ahead at `x.push(...)`.
+        self.inferred_empty_vec_types.clear();
+        {
+            let mut targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+            Self::collect_empty_vec_targets(&f.body.stmts, &mut targets);
+            if !targets.is_empty() {
+                let mut pending: HashMap<String, CType> = HashMap::new();
+                let mut vars: HashMap<String, CType> = HashMap::new();
+                for (i, p) in f.params.iter().enumerate() {
+                    vars.insert(p.name.clone(), params[i].clone());
+                }
+                self.scan_for_empty_vec_pushes(&f.body.stmts, &targets, &mut pending, &mut vars);
+                self.inferred_empty_vec_types = pending;
+            }
+        }
         for s in &f.body.stmts {
             self.emit_stmt(s)?;
         }
@@ -748,7 +922,18 @@ impl Codegen {
                 // default to `vec[i64]` and mismatch `let v: vec[Point]`).
                 let decl_hint = match ty {
                     Some(t) => Some(map_type_with(t, *span, Some(&self.structs), Some(&self.enums))?),
-                    None => None,
+                    None => {
+                        // v0.1.24: if this is a `let name = vec[]` with no
+                        // annotation, see whether the pre-pass inferred an
+                        // element type from a later `name.push(e)`.
+                        if matches!(&value.kind, ExprKind::VecLit(items) if items.is_empty()) {
+                            self.inferred_empty_vec_types.get(name)
+                                .cloned()
+                                .map(|t| CType::Vec(Box::new(t)))
+                        } else {
+                            None
+                        }
+                    }
                 };
                 let is_empty_vec_lit = matches!(&value.kind, ExprKind::VecLit(items) if items.is_empty());
                 let (code, val_ty) = if is_empty_vec_lit {
@@ -1460,6 +1645,65 @@ impl Codegen {
                     }
                     writeln!(self.body, "{}    default: __builtin_unreachable();", self.pad()).unwrap();
                     writeln!(self.body, "{}}}", self.pad()).unwrap();
+                }
+                CType::Vec(inner) => {
+                    // v0.1.24: render vec contents like the interpreter
+                    // (`vec[a, b, c]`) instead of the `<vec>` placeholder.
+                    // Flush whatever's queued so the loop can stand alone.
+                    if !fmt.is_empty() {
+                        if vals.is_empty() {
+                            writeln!(self.body, "{}printf(\"{}\");", self.pad(), fmt).unwrap();
+                        } else {
+                            writeln!(self.body, "{}printf(\"{}\", {});",
+                                     self.pad(), fmt, vals.join(", ")).unwrap();
+                        }
+                        fmt.clear();
+                        vals.clear();
+                    }
+                    let n = self.tmp_counter;
+                    self.tmp_counter += 1;
+                    let vec_decl = CType::Vec(inner.clone()).c_decl();
+                    writeln!(self.body, "{}{} __pv_{} = {};", self.pad(), vec_decl, n, code).unwrap();
+                    writeln!(self.body, "{}printf(\"vec[\");", self.pad()).unwrap();
+                    writeln!(self.body, "{}for (size_t __pi_{n} = 0; __pi_{n} < __pv_{n}.len; __pi_{n}++) {{",
+                             self.pad(), n = n).unwrap();
+                    writeln!(self.body, "{}    if (__pi_{n}) printf(\", \");", self.pad(), n = n).unwrap();
+                    // Per-element formatting — same shape as interp's `display()`,
+                    // not the debug form (strings are unquoted).
+                    let elem_expr = format!("__pv_{}.data[__pi_{}]", n, n);
+                    match inner.as_ref() {
+                        CType::I64 => writeln!(self.body, "{}    printf(\"%\" PRId64, {});", self.pad(), elem_expr).unwrap(),
+                        CType::U64 => writeln!(self.body, "{}    printf(\"%\" PRIu64, {});", self.pad(), elem_expr).unwrap(),
+                        CType::F64 => writeln!(self.body, "{}    printf(\"%g\", {});", self.pad(), elem_expr).unwrap(),
+                        CType::Bool => writeln!(self.body, "{}    printf(\"%s\", ({}) ? \"true\" : \"false\");", self.pad(), elem_expr).unwrap(),
+                        CType::Str => writeln!(self.body, "{}    printf(\"%s\", {});", self.pad(), elem_expr).unwrap(),
+                        CType::Struct(sname) => {
+                            let fields = self.structs.get(sname).cloned().unwrap();
+                            let mut sf = String::new();
+                            let mut sv: Vec<String> = Vec::new();
+                            sf.push_str(sname);
+                            sf.push('{');
+                            for (fi, (fname, fty)) in fields.iter().enumerate() {
+                                if fi > 0 { sf.push_str(", "); }
+                                sf.push_str(fname);
+                                sf.push_str(": ");
+                                sf.push_str(&debug_fmt_for(fty));
+                                sv.push(debug_val_for(fty, &format!("{}.{}", elem_expr, fname)));
+                            }
+                            sf.push('}');
+                            let sa = if sv.is_empty() { String::new() } else { format!(", {}", sv.join(", ")) };
+                            writeln!(self.body, "{}    printf(\"{}\"{});", self.pad(), sf, sa).unwrap();
+                        }
+                        other => {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("C backend: `print(vec[{}])` not supported yet", other.c_decl()),
+                                a.span,
+                            ));
+                        }
+                    }
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                    writeln!(self.body, "{}printf(\"]\");", self.pad()).unwrap();
                 }
                 _ => {
                     fmt.push_str(ty.printf_fmt());
