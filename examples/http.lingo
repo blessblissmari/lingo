@@ -1,5 +1,5 @@
 # a tiny http server. demonstrates structured concurrency via `nursery`,
-# explicit errors, and the (sketched) stdlib api.
+# one-error-type-per-fn, explicit allocator, and the sketched stdlib api.
 
 use net
 use http
@@ -14,9 +14,12 @@ fn handle(req: http.Request) -> http.Response:
             return http.Response.not_found()
 
 fn main() ! net.Error:
-    let listener = net.tcp.listen("0.0.0.0:8080")?
+    let gpa = Gpa.new()
+    defer gpa.deinit()
+
+    let listener = net.tcp.listen(addr: "0.0.0.0:8080")?
     print("listening on :8080")
 
-    with nursery() as n:
+    with nursery(alloc: &gpa) as n:
         for conn in listener.incoming():
-            n.spawn(|| http.serve(conn?, handle))
+            n.spawn(|| http.serve(conn: conn?, handler: handle, alloc: &gpa))
