@@ -1,47 +1,43 @@
 # lingo — roadmap
 
-> goal: a usable v1.0 self-hosted compiler. realistic time horizon: 12-18 months
-> of focused work, or ~36 if it's a nights-and-weekends thing. either is fine.
+> goal: a usable v1.0 self-hosted compiler.
 
-## phase 0 — design (we are here)
+## phase 0 — design ✅ done
 
 - [x] vision + readme
 - [x] design rationale (`docs/DESIGN.md`)
-- [x] syntax sketch (`docs/SYNTAX.md`)
-- [ ] decide: rust-style borrow checker vs. zig-style allocators vs. hybrid
-- [ ] decide: single-error-type vs. union-of-errors per fn (`! E` vs `! E | F`)
-- [ ] write the bnf grammar
-- [ ] hand-write 20+ programs in the proposed syntax and grade their readability
-- [ ] get 3 outside reviewers to roast the design
+- [x] syntax reference (`docs/SYNTAX.md`)
+- [x] committed decisions (`docs/DECISIONS.md`)
+- [x] grammar sketch (`docs/GRAMMAR.bnf`)
 
-**exit criteria:** the grammar is stable enough that two people writing
-example programs independently produce code that looks the same.
+**exit:** the rules are written down. when you hesitate while implementing,
+you re-read `DECISIONS.md`, not "open questions".
 
-## phase 1 — frontend (v0.1)
+## phase 1 — frontend (v0.1) — in rust
 
-implementation language: **rust** (boring, fast, great parsing libs).
+- [ ] lexer (hand-written, INDENT/DEDENT, raises on mixed tabs+spaces)
+- [ ] parser → ast (recursive descent, generates source spans)
+- [ ] desugaring pass:
+  - `?` → match
+  - `f"..."` → `string.concat([...])` calls
+  - `for x in iter:` → iterator protocol
+- [ ] name resolution + scope analysis (catches shadowing, undefined names)
+- [ ] type checker (hindley-milner inside fn bodies, nominal at boundaries)
+- [ ] tree-walking interpreter (for tests; no codegen yet)
+- [ ] 500-program test suite, mostly hand-written, partly llm-generated
 
-- [ ] lexer (hand-written, with significant indentation)
-- [ ] parser → ast
-- [ ] desugaring pass (e.g. `?` → match)
-- [ ] type checker (hindley-milner style for locals, nominal for boundaries)
-- [ ] borrow checker (the simple version, no lifetimes)
-- [ ] tree-walking interpreter (for tests and quick experiments)
-- [ ] a 500-program test suite, mostly hand-written
-
-**exit criteria:** the interpreter runs `examples/*.lingo` correctly.
+**exit:** the interpreter runs every `examples/*.lingo` correctly.
 
 ## phase 2 — backend (v0.2)
 
-- [ ] mid-level IR (SSA, similar to MIR in spirit)
-- [ ] LLVM backend (codegen + linker integration)
+- [ ] mid-level IR (SSA)
+- [ ] LLVM backend via `inkwell` (linux x86_64 first)
+- [ ] linker integration → single-file native binary
 - [ ] QBE backend for fast debug builds (optional but nice)
-- [ ] single-file native binaries on linux + macos + windows
-- [ ] basic optimization passes (inline, dce, constant folding) on the mid-IR
+- [ ] basic optimisation passes (inline, dce, constant folding)
 - [ ] no stdlib yet — just `print`, primitives, and structs
 
-**exit criteria:** fib, sieve, mandelbrot, and a couple of micro-benchmarks
-run within 2x of equivalent zig.
+**exit:** fib, sieve, mandelbrot run within 2× of equivalent zig.
 
 ## phase 3 — stdlib (v0.3)
 
@@ -49,7 +45,7 @@ a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers
 - `fs` — file ops, paths
-- `str` — utf-8 string ops, parsing, formatting
+- `str` — utf-8 ops, parsing, formatting
 - `vec`, `map`, `set`, `option`, `result` (built-in but documented here)
 - `iter` — combinators (`map`, `filter`, `fold`, `take`, `zip`, `enumerate`)
 - `time` — instants, durations
@@ -58,45 +54,48 @@ a deliberately small core:
 - `rand` — seeded prng
 - `json` — parse/stringify
 - `net` — tcp, udp, ip parsing
-- `sync` — mutex, atomic, channel (for the nursery runtime)
+- `sync` — mutex, atomic, channel
+- `nursery` — structured concurrency runtime
 
-**exit criteria:** can write a non-trivial cli tool and a tiny http server
-in pure lingo.
+**exit:** can write a non-trivial cli tool and a tiny http server in pure lingo.
 
 ## phase 4 — tooling (v0.4)
 
 - [ ] `lingo fmt` — opinionated formatter (no options)
-- [ ] `lingo doc` — generates html docs from `##` doc comments
+- [ ] `lingo doc` — html docs from `##` comments
 - [ ] `lingo test` — built-in test runner; `test "name": ...` blocks
 - [ ] `lingo lsp` — language server (completion, goto-def, hover, diagnostics)
 - [ ] vscode + neovim plugins
-- [ ] **pkg** — package manager, single-source-of-truth `lingo.toml`
-- [ ] **docs.lingo.dev** — package registry
+- [ ] `lingo pkg` — package manager, `lingo.toml`
+- [ ] **docs.lingo.dev** — package registry (only after v0.4 is real)
 
-**exit criteria:** an outside contributor can clone a project, run
-`lingo build`, and have it work.
+**exit:** an outside contributor clones a project, runs `lingo build`, it works.
 
 ## phase 5 — self-hosting (v1.0)
 
-rewrite the compiler in lingo. once it can compile itself, freeze the v1.0
+rewrite the compiler in lingo. once it compiles itself, freeze the v1.0
 grammar.
 
-**exit criteria:** `lingo build` of the lingo compiler produces a binary
-byte-identical to one bootstrapped from rust.
+**exit:** `lingo build` of the lingo compiler produces a binary byte-identical
+to one bootstrapped from rust.
 
-## things explicitly punted past v1.0
+## punted past v1.0
 
-- async/await two-color split (we're starting with nurseries)
+- async/await two-color split (we have nurseries)
 - gpu / cuda backends
 - ios / android targets (linux/macos/windows first)
 - a web playground (we'll do one anyway because it's fun)
 - jit / repl
+- user-facing `comptime`
 
-## what to do *first* if you have one weekend
+## first-weekend plan
 
-1. lock the grammar (bnf in `compiler/grammar.bnf`).
-2. write the lexer + a parser that can parse `examples/hello.lingo`.
-3. write a tree-walker that can execute it.
-4. celebrate. now do `fib.lingo`.
+if you have one weekend:
+
+1. lock the grammar (it's in `docs/GRAMMAR.bnf` — iterate on it).
+2. write the lexer in rust. just lex `examples/hello.lingo` and print tokens.
+3. write a parser that produces an ast for the same file.
+4. write a tree-walker that prints `"hello, lingo"`.
+5. celebrate. next weekend, do `fib.lingo`.
 
 incremental wins beat a one-year stealth compiler every time.
