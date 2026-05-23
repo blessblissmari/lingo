@@ -228,6 +228,14 @@ print(double(7))
 }
 
 #[test]
+fn c_backend_str_chars_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("str_chars_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("str_chars_native.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
 fn c_backend_vec_user_types_native_matches_interp() {
     let Some((native_out, stderr, code)) = run_native("vec_user_types_native.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
