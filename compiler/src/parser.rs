@@ -236,7 +236,7 @@ impl Parser {
                 let s_tok = self.advance();
                 params.push(Param {
                     name: "self".into(),
-                    ty: TypeRef { name: "Self".into(), span: s_tok.span },
+                    ty: TypeRef { name: "Self".into(), type_args: Vec::new(), span: s_tok.span },
                     span: s_tok.span,
                 });
                 if self.eat(Tok::Comma) {
@@ -321,7 +321,25 @@ impl Parser {
             Tok::Ident(s) => s,
             _ => unreachable!(),
         };
-        Ok(TypeRef { name, span: t.span })
+        let mut type_args = Vec::new();
+        let mut end = t.span.end;
+        if self.eat(Tok::LBracket) {
+            if !self.at(Tok::RBracket) {
+                loop {
+                    type_args.push(self.type_ref()?);
+                    if !self.eat(Tok::Comma) {
+                        break;
+                    }
+                }
+            }
+            let close = self.expect(Tok::RBracket, "`]` to close type args")?;
+            end = close.span.end;
+        }
+        Ok(TypeRef {
+            name,
+            type_args,
+            span: Span::new(t.span.start, end),
+        })
     }
 
     // ---- block & statements ----
@@ -947,6 +965,24 @@ impl Parser {
             }
             Tok::Ident(s) => {
                 self.advance();
+                // vec literal: `vec[a, b, c]`
+                if s == "vec" && self.at(Tok::LBracket) {
+                    self.advance(); // consume `[`
+                    let mut items = Vec::new();
+                    if !self.at(Tok::RBracket) {
+                        loop {
+                            items.push(self.expr()?);
+                            if !self.eat(Tok::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(Tok::RBracket, "`]` to close vec literal")?;
+                    return Ok(Expr {
+                        kind: ExprKind::VecLit(items),
+                        span: Span::new(tok.span.start, close.span.end),
+                    });
+                }
                 // struct literal: `Name{field: value, ...}` (only if Name starts uppercase)
                 if self.at(Tok::LBrace)
                     && s.chars().next().map_or(false, |c| c.is_ascii_uppercase())
