@@ -1,0 +1,3 @@
+const SHOUT = "HI"
+fn greet() -> str:
+    return "hello from foo.bar"

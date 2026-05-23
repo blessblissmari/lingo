@@ -449,3 +449,57 @@ impl Bag[int] for IntBag:
 - this rules out a class of bugs (which impl did i actually get?) at
   the cost of expressivity we don't need yet.
 
+
+## v0.3 — decisions added during the 0.3.x line
+
+### modules: one file = one module, dotted paths, alias optional
+
+- `import foo` reads `foo.lingo` next to the entry file.
+- `import foo.bar` reads `foo/bar.lingo` next to the entry file — the
+  dots map directly to directory separators.  there is no module
+  search path, no `LINGO_PATH`, no current-dir-vs-file-dir
+  confusion: everything is relative to the file that holds the
+  `import`.  the same dotted path means the same file no matter
+  which module reads it.
+- `import foo.bar as b` introduces the alias `b`; without `as` the
+  alias is the last dotted segment (`bar`).
+- the alias is **the only way** to reach another module's names.
+  `b.fn()`, `b.CONST`, and `b.MyEnum.Variant` work; bare `fn()` only
+  resolves locally.  reading code, you can see at a glance which
+  module a name came from — that's worth more than the keystrokes.
+- imports are **resolved before any other pass runs**.  the resolver
+  flattens every transitively-reachable file into one `Program` by
+  prefixing every non-entry module's top-level names with `lm{i}__`
+  and rewriting every `alias.name` access in any module to the
+  matching prefixed name.  the interpreter and the C backend never
+  see an `Item::Import` — they keep working on one flat program,
+  exactly as in v0.2.x.
+- **deferred to v0.3.x:** cross-module *type references*
+  (`fn f() -> bar.Point`) and cross-module struct literals
+  (`bar.Point{ x: 1 }`).  workaround today: write a constructor
+  function in `bar` and call it from the entry module.  this is
+  enough for real programs to live in more than one file, and we
+  can add the parser surface for `bar.Point` later without
+  changing today's surface area.
+- **no re-exports, no `import *`, no privacy modifiers**.  one
+  module exports every top-level name it declares; if you wanted
+  fewer names visible, you'd be writing a smaller module.
+- **cycle detection is mandatory** — `a.lingo` imports `b.lingo`
+  and `b.lingo` imports `a.lingo` is a hard error, not a runtime
+  surprise.  the diagnostic names the cycle chain (`a.lingo ->
+  b.lingo -> a.lingo`) so the reader knows exactly which file to
+  edit.
+- **duplicate aliases inside one file** (`import foo` then
+  `import bar as foo`) is a hard error.  silently letting one
+  shadow the other would defeat the "you can see which module
+  this name came from" rule.
+
+### name mangling is a backend detail, not a surface feature
+
+- top-level names in non-entry modules become `lm0__foo`, `lm1__foo`,
+  …  the prefix is deterministic (modules are sorted by their
+  assigned prefix when flattened), so re-running the compiler on
+  the same inputs produces byte-identical C.
+- users never see, write, or import a mangled name.  the prefix
+  exists only to keep the flat program collision-free; if you want
+  to call `math.add` you write `math.add`.

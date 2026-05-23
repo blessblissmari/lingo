@@ -17,13 +17,25 @@ fn cargo_bin() -> String {
 /// Skipped silently when no C compiler is available.
 fn run_native(file: &str) -> Option<(String, String, i32)> {
     which_cc()?;
-    let tmp = std::env::temp_dir().join(format!("lingo_native_{}", file.replace('/', "_")));
-    let _ = std::fs::remove_file(&tmp);
-    // build
+    // `lingo build` writes its output binary into the *current
+    // directory* under the entry file's stem.  Multiple tests
+    // building `main.lingo` in parallel (the v0.3.0 module examples
+    // all use `examples/{name}/main.lingo`) would otherwise race on a
+    // shared `./main` file.  Give each test its own scratch cwd so
+    // builds and runs are isolated.
+    let project_root = std::env::current_dir().expect("cwd");
+    let entry_abs = project_root.join("examples").join(file);
+    let stem = std::path::Path::new(file).file_stem().unwrap().to_string_lossy().to_string();
+    let work_dir = std::env::temp_dir().join(format!(
+        "lingo_native_{}",
+        file.replace(['/', '.'], "_")
+    ));
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir).expect("scratch dir");
     let build = Command::new(cargo_bin())
+        .current_dir(&work_dir)
         .arg("build")
-        .arg(format!("examples/{file}"))
-        .env("LINGO_OUT", tmp.to_string_lossy().to_string())
+        .arg(&entry_abs)
         .output()
         .expect("failed to invoke lingo build");
     if !build.status.success() {
@@ -33,13 +45,11 @@ fn run_native(file: &str) -> Option<(String, String, i32)> {
             String::from_utf8_lossy(&build.stderr)
         );
     }
-    // `lingo build` writes the binary into the cwd; find it by stem.
-    let stem = std::path::Path::new(file).file_stem().unwrap().to_string_lossy().to_string();
-    let bin = std::path::Path::new(&stem).to_path_buf();
+    let bin = work_dir.join(&stem);
     if !bin.exists() {
         return None;
     }
-    let run = Command::new(format!("./{}", stem)).output().ok()?;
+    let run = Command::new(&bin).current_dir(&work_dir).output().ok()?;
     Some((
         String::from_utf8_lossy(&run.stdout).to_string(),
         String::from_utf8_lossy(&run.stderr).to_string(),
@@ -948,4 +958,149 @@ rect area: 12.0
 triangle area: 6.0
 ";
     assert_eq!(stdout, expected);
+}
+
+// =====================================================================
+// v0.3.0 — multi-file modules.
+//
+// Each module example lives in its own subdirectory under `examples/`
+// (so the resolver has a concrete entry-file directory to walk
+// `import foo.bar` from).  Interp + native are checked together to
+// catch any drift between the two backends.
+// =====================================================================
+
+#[test]
+fn modules_basic() {
+    let (stdout, stderr, code) = run("modules_basic/main.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "2 + 3 = 5\nsquare(7) = 49\nPI ~ 3\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn modules_basic_native() {
+    let Some((stdout, stderr, code)) = run_native("modules_basic/main.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("modules_basic/main.lingo");
+    assert_eq!(stdout, interp_out, "native diverged from interp");
+}
+
+#[test]
+fn modules_alias() {
+    let (stdout, stderr, code) = run("modules_alias/main.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "m.add(10, 20) = 30\nm.PI = 3\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn modules_alias_native() {
+    let Some((stdout, stderr, code)) = run_native("modules_alias/main.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("modules_alias/main.lingo");
+    assert_eq!(stdout, interp_out);
+}
+
+#[test]
+fn modules_nested() {
+    // `import foo.bar` resolves to `foo/bar.lingo` relative to the
+    // entry file's directory.  Verifies the dotted-path lowering in
+    // the resolver.
+    let (stdout, stderr, code) = run("modules_nested/main.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "bar.greet() = hello from foo.bar\nbar.SHOUT = HI\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn modules_nested_native() {
+    let Some((stdout, stderr, code)) = run_native("modules_nested/main.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("modules_nested/main.lingo");
+    assert_eq!(stdout, interp_out);
+}
+
+#[test]
+fn modules_enum() {
+    // Each module is free to declare its own structs/enums and use
+    // them in its own functions.  Cross-module *type references*
+    // (`fn f() -> bar.Point`) are deferred to v0.3.x — this example
+    // only exercises within-module uses.
+    let (stdout, stderr, code) = run("modules_enum/main.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "area_sq(4) = 16\narea_rect(3, 5) = 15\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn modules_enum_native() {
+    let Some((stdout, stderr, code)) = run_native("modules_enum/main.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("modules_enum/main.lingo");
+    assert_eq!(stdout, interp_out);
+}
+
+// ---- diagnostic-shape negative tests -------------------------------
+
+#[test]
+fn modules_reject_missing_file() {
+    // `import does_not_exist` with no matching .lingo on disk should
+    // produce a clear, file-pointing diagnostic — not a generic IO
+    // error from the OS layer.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let dir = std::env::temp_dir().join("lingo_modules_missing");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.lingo");
+    std::fs::write(&entry, "import does_not_exist\nfn main():\n    print(\"hi\")\n").unwrap();
+    let out = Command::new(bin).arg(&entry).output().expect("run lingo");
+    assert!(!out.status.success(), "should reject missing import target");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot resolve `import does_not_exist`"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn modules_reject_duplicate_alias() {
+    // Two `import` statements in the same file that produce the same
+    // alias (either by name collision or via `as`) must be rejected.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let dir = std::env::temp_dir().join("lingo_modules_dup_alias");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.lingo");
+    let a = dir.join("a.lingo");
+    let b = dir.join("b.lingo");
+    std::fs::write(&entry, "import a\nimport b as a\nfn main():\n    print(\"hi\")\n").unwrap();
+    std::fs::write(&a, "fn x() -> int:\n    return 1\n").unwrap();
+    std::fs::write(&b, "fn y() -> int:\n    return 2\n").unwrap();
+    let out = Command::new(bin).arg(&entry).output().expect("run lingo");
+    assert!(!out.status.success(), "should reject duplicate alias");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("duplicate import alias `a`"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn modules_reject_import_cycle() {
+    // Two modules importing each other should report a cycle, not
+    // recurse forever.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let dir = std::env::temp_dir().join("lingo_modules_cycle");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.lingo");
+    let a = dir.join("a.lingo");
+    let b = dir.join("b.lingo");
+    std::fs::write(&entry, "import a\nfn main():\n    print(a.hello())\n").unwrap();
+    std::fs::write(&a, "import b\nfn hello() -> str:\n    return b.tag()\n").unwrap();
+    std::fs::write(&b, "import a\nfn tag() -> str:\n    return \"b\"\n").unwrap();
+    let out = Command::new(bin).arg(&entry).output().expect("run lingo");
+    assert!(!out.status.success(), "should reject import cycle");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cyclic import"), "wrong diagnostic: {stderr}");
 }

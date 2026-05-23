@@ -1,0 +1,7 @@
+# `import X as Y` — the alias `m` is local to this file; `math.add`
+# from another module would not conflict.
+import math as m
+
+fn main():
+    print(f"m.add(10, 20) = {m.add(10, 20)}")
+    print(f"m.PI = {m.PI}")

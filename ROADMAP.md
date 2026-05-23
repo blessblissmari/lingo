@@ -84,7 +84,38 @@
 
 ## phase 3 — stdlib (v0.3)
 
-a deliberately small core:
+before any of this can land, we need multi-file programs.  v0.3.0 ships
+**modules** so the stdlib can be one file at a time, and so user
+programs aren't forced to live in one `.lingo` file.
+
+- [x] **Multi-file modules — `import foo.bar` (v0.3.0)**: a brand-new
+  `compiler/src/modules.rs` resolver runs *before* the interp / C
+  backend and flattens every transitively-reachable file into one
+  `Program` AST.  `import foo` reads `foo.lingo` next to the entry
+  file; `import foo.bar` lowers the dots to directory separators
+  (`foo/bar.lingo`); `import foo as f` lets you rename the alias.  the
+  alias is the only way to reach another module's names: `f.fn()`,
+  `f.CONST`, and `f.MyEnum.Variant` work, bare `fn()` only resolves
+  locally.  every non-entry module's top-level names are prefixed
+  `lm{i}__` deterministically so the flat program stays
+  collision-free; users never see the prefix.  cycles are caught
+  with a named chain (`a.lingo -> b.lingo -> a.lingo`); duplicate
+  aliases inside one file and missing import targets get clear
+  file-pointing diagnostics.  the C backend's `pass 3` now opens a
+  module-level scope frame so top-level consts (previously
+  untested in single-file v0.2.x because no example exercised them)
+  are visible from any function body.  the resolver also reorders
+  flattened items so types come before consts come before
+  functions, matching what readers naturally write in single-file
+  programs.  4 new examples (`modules_basic`, `modules_alias`,
+  `modules_nested`, `modules_enum`), 7 new integration tests +
+  3 negative diagnostic tests = 76/76 green; audit 36/38
+  byte-identical (2 still interactive).  clippy 0 warnings.
+  **deferred to v0.3.x:** cross-module *type references*
+  (`fn f() -> bar.Point`) and cross-module struct literals
+  (`bar.Point{}`).
+
+then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers
 - `fs` — file ops, paths
