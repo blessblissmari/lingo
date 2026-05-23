@@ -228,6 +228,15 @@ print(double(7))
 }
 
 #[test]
+fn c_backend_parse_port_native_matches_interp() {
+    // The canonical `T!E` / `?` / match-on-result example.
+    let Some((native_out, stderr, code)) = run_native("parse_port.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("parse_port.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
 fn c_backend_str_chars_native_matches_interp() {
     let Some((native_out, stderr, code)) = run_native("str_chars_native.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
