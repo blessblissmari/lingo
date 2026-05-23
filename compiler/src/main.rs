@@ -2,11 +2,13 @@
 //!
 //! Usage:
 //!     lingo path/to/file.lingo        # run the file (tree-walking interpreter)
+//!     lingo build path/file.lingo     # lower to C, compile with gcc, emit native binary
+//!     lingo emit-c path/file.lingo    # dump the generated C source to stdout
 //!     lingo --tokens path/file.lingo  # dump the token stream
 //!     lingo --ast    path/file.lingo  # dump the parsed AST
 //!     lingo --version                 # print version
 //!
-//! Anything else (build, lsp, fmt, test, repl) is a v0.2+ feature.
+//! Anything else (lsp, fmt, test, repl) is a v0.2+ feature.
 
 use std::process::ExitCode;
 
@@ -36,6 +38,20 @@ fn main() -> ExitCode {
             }
             (Mode::Ast, args[2].clone(), Vec::new())
         }
+        "build" => {
+            if args.len() < 3 {
+                eprintln!("build needs a file: lingo build foo.lingo");
+                return ExitCode::from(2);
+            }
+            (Mode::Build, args[2].clone(), Vec::new())
+        }
+        "emit-c" => {
+            if args.len() < 3 {
+                eprintln!("emit-c needs a file: lingo emit-c foo.lingo");
+                return ExitCode::from(2);
+            }
+            (Mode::EmitC, args[2].clone(), Vec::new())
+        }
         // everything after the .lingo file becomes the program's `args()`.
         _ => (Mode::Run, args[1].clone(), args[2..].to_vec()),
     };
@@ -49,6 +65,56 @@ fn main() -> ExitCode {
     };
 
     match mode {
+        Mode::EmitC => match lingoc::emit_c(&source, &path) {
+            Ok(c) => {
+                print!("{c}");
+                ExitCode::SUCCESS
+            }
+            Err(msg) => {
+                eprintln!("{msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Mode::Build => {
+            let c = match lingoc::emit_c(&source, &path) {
+                Ok(c) => c,
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // derive output binary name from input file stem
+            let stem = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("a");
+            let c_path = format!("{}.c", stem);
+            if let Err(e) = std::fs::write(&c_path, &c) {
+                eprintln!("error: cannot write {c_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+            let cc = std::env::var("LINGO_CC").unwrap_or_else(|_| "cc".to_string());
+            let out_bin = stem.to_string();
+            let status = std::process::Command::new(&cc)
+                .arg("-O2").arg("-std=c99").arg("-Wall")
+                .arg(&c_path)
+                .arg("-o").arg(&out_bin)
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    eprintln!("compiled `{path}` -> `./{out_bin}` (via {cc})");
+                    ExitCode::SUCCESS
+                }
+                Ok(s) => {
+                    eprintln!("{cc} failed with exit code {:?}", s.code());
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    eprintln!("could not run {cc}: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Mode::Run => match lingoc::run_with_argv(&source, &path, prog_args) {
             Ok(_) => ExitCode::SUCCESS,
             Err(msg) => {
@@ -94,4 +160,6 @@ enum Mode {
     Run,
     Tokens,
     Ast,
+    Build,
+    EmitC,
 }
