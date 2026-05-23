@@ -1,0 +1,11 @@
+# bench: how fast is the native compile?
+# fib(35) recursive — pure exponential work, no allocations.
+# interpreter: seconds.  native: milliseconds.
+
+fn fib(n: u64) -> u64:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main():
+    print(fib(35))
