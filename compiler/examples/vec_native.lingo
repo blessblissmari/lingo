@@ -1,0 +1,25 @@
+# vec[i64] in the C backend.  Read-only for now: literal, len, get, iteration.
+# Mutation lands once we wire up an allocator.
+
+fn sum(xs: vec[i64]) -> i64:
+    let mut total = 0
+    for x in xs:
+        total = total + x
+    return total
+
+fn dot(xs: vec[i64], ys: vec[i64]) -> i64:
+    let mut total = 0
+    let n = xs.len()
+    for i in 0..n:
+        total = total + xs.get(i) * ys.get(i)
+    return total
+
+fn main():
+    let xs = vec[10, 20, 30, 40]
+    print("len:", xs.len())
+    print("first:", xs.get(0))
+    print("last:", xs.get(3))
+    print("sum:", sum(xs))
+    print("dot:", dot(vec[1, 2, 3], vec[4, 5, 6]))
+    for x in xs:
+        print("x =", x)
