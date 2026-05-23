@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.18 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, and **traits + enum methods in native (static dispatch)**. 27/27 integration tests green.
+> ⚠️ **status:** v0.1.19 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, and **monomorphized `vec[Struct]` / `vec[Enum]` in native**. 29/29 integration tests green.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -191,7 +191,9 @@ native-capable:
 [`vec_push_native`](compiler/examples/vec_push_native.lingo) ·
 [`wordcount_native`](compiler/examples/wordcount_native.lingo) ·
 [`shapes`](compiler/examples/shapes.lingo) ·
-[`traits_native`](compiler/examples/traits_native.lingo)
+[`traits_native`](compiler/examples/traits_native.lingo) ·
+[`traits`](compiler/examples/traits.lingo) ·
+[`vec_user_types_native`](compiler/examples/vec_user_types_native.lingo)
 
 interp-only (waiting on `?`/`!E` lowering, trait vtables, or `T!E` lowering):
 [`words`](compiler/examples/words.lingo) ·
