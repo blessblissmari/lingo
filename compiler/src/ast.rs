@@ -1,18 +1,18 @@
-//! Abstract syntax tree for v0.1.
+//! Abstract syntax tree for lingo v0.1.
 //!
-//! We only model the subset the interpreter understands today:
-//!   - top-level fn declarations and const declarations
-//!   - typed parameters and return types (types are stored as strings;
-//!     a real checker comes in v0.1.1)
-//!   - let bindings (mut / immut)
-//!   - if / elif / else
-//!   - for over a range
-//!   - return, break, continue
-//!   - call, field, arithmetic / comparison / boolean ops, range, unary
+//! Scope today:
+//!   - top-level: fn / const / struct / enum / impl
+//!   - typed parameters and return types (types stored as ref names; a
+//!     proper type checker comes in v0.1.x)
+//!   - `let` / `let mut` (shadowing forbidden)
+//!   - `if` / `elif` / `else`
+//!   - `for x in start..end`
+//!   - `return`, `break`, `continue`
+//!   - `match` with literal, wildcard, bind, and `Type.Variant(...)` patterns
+//!   - call, field, struct-literal, method-call, range, unary, binary
 //!   - literals: int, float, str, bool, none
 //!
-//! Structs, enums, traits, generics, error types, defer and nursery all
-//! live in later milestones and are intentionally absent from this AST.
+//! Generics, error types, defer, nursery and closures are still pending.
 
 use crate::error::Span;
 
@@ -25,6 +25,9 @@ pub struct Program {
 pub enum Item {
     Fn(FnDecl),
     Const(ConstDecl),
+    Struct(StructDecl),
+    Enum(EnumDecl),
+    Impl(ImplBlock),
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +61,41 @@ pub struct ConstDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct StructDecl {
+    pub name: String,
+    pub fields: Vec<FieldDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldDecl {
+    pub name: String,
+    pub ty: TypeRef,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDecl {
+    pub name: String,
+    pub variants: Vec<EnumVariant>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    pub payload: Vec<TypeRef>, // empty = nullary variant
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImplBlock {
+    pub target: String,         // type name being impl'd
+    pub methods: Vec<FnDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub span: Span,
@@ -73,7 +111,7 @@ pub enum Stmt {
         span: Span,
     },
     Assign {
-        target: String,
+        target: AssignTarget,
         value: Expr,
         span: Span,
     },
@@ -92,9 +130,47 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+        span: Span,
+    },
     Break(Span),
     Continue(Span),
     Expr(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub enum AssignTarget {
+    Name(String),
+    Field(Box<Expr>, String), // x.field = value (only on `self` in v0.1.1)
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    Wildcard(Span),
+    Bind(String, Span),
+    Literal(PatLit, Span),
+    Variant {
+        type_name: Option<String>, // None = bare variant like `none`, `some`
+        variant: String,
+        sub: Vec<Pattern>,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum PatLit {
+    Int(i64),
+    Str(String),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -111,11 +187,17 @@ pub enum ExprKind {
     Bool(bool),
     None_,
     Ident(String),
+    Self_,
     PrintBuiltin,
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(Box<Expr>, Vec<Arg>),
     Range(Box<Expr>, Box<Expr>),
+    Field(Box<Expr>, String),
+    StructLit {
+        name: String,
+        fields: Vec<(String, Expr)>,
+    },
 }
 
 #[derive(Debug, Clone)]
