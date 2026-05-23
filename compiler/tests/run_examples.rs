@@ -228,6 +228,23 @@ print(double(7))
 }
 
 #[test]
+fn c_backend_greet_native_matches_interp() {
+    // f-string interpolation of struct values is the v0.1.22 unlock.
+    let Some((native_out, stderr, code)) = run_native("greet.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("greet.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
+fn c_backend_fstring_enum_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("fstring_enum_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("fstring_enum_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+#[test]
 fn c_backend_parse_port_native_matches_interp() {
     // The canonical `T!E` / `?` / match-on-result example.
     let Some((native_out, stderr, code)) = run_native("parse_port.lingo") else { return };
