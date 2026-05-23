@@ -84,6 +84,81 @@ fn hello() {
 }
 
 #[test]
+fn forever() {
+    let (stdout, stderr, code) = run("forever.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "0\n121\n0\n1\n2\ndone\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_forever_native_matches_interp() {
+    // v0.1.26: `for _ in forever:` lowers to `while (1) { ... }` in the C
+    // backend.  Cross-check against the interpreter so future codegen
+    // changes can't quietly drift.
+    let Some((native_out, stderr, code)) = run_native("forever.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("forever.lingo");
+    assert_eq!(native_out, interp_out, "native and interpreter outputs diverged");
+}
+
+#[test]
+fn forever_rejects_named_loop_var() {
+    // `for x in forever:` is an error — `forever` yields no value, so the
+    // loop variable must be `_`.  Both the interpreter and the C backend
+    // must reject it with the same message.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let src = "fn main():\n    for x in forever:\n        break\n";
+    let path = std::env::temp_dir().join("lingo_forever_bad.lingo");
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .arg(&path)
+        .output()
+        .expect("run lingo");
+    assert!(!out.status.success(), "expected interp to reject named forever loop var");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`for x in forever:`"),
+        "interp error missing the offending line: {stderr}"
+    );
+    assert!(
+        stderr.contains("must be `_`"),
+        "interp error doesn't explain why: {stderr}"
+    );
+
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "expected C backend to reject named forever loop var");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("must be `_`"),
+        "C-backend error doesn't explain why: {stderr}"
+    );
+}
+
+#[test]
+fn forever_rejects_value_use() {
+    // `let x = forever` must be a compile error — `forever` is not a value.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let src = "fn main():\n    let x = forever\n    print(x)\n";
+    let path = std::env::temp_dir().join("lingo_forever_value.lingo");
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .arg(&path)
+        .output()
+        .expect("run lingo");
+    assert!(!out.status.success(), "expected interp to reject `forever` as a value");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`forever` is not a value"),
+        "wrong error: {stderr}"
+    );
+}
+
+#[test]
 fn fib() {
     let (stdout, stderr, code) = run("fib.lingo");
     assert_eq!(code, 0, "stderr: {stderr}");

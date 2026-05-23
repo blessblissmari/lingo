@@ -625,6 +625,32 @@ impl Interp {
                 }
             }
             Stmt::For { var, iter, body, span: _ } => {
+                // `for _ in forever:` — infinite loop. Only `_` is allowed as the
+                // loop variable here; the iterable produces no value.
+                if matches!(iter.kind, ExprKind::Forever) {
+                    if var != "_" {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!(
+                                "`for {} in forever:` is not allowed — the loop variable must be `_` because `forever` yields no value",
+                                var
+                            ),
+                            iter.span,
+                        ));
+                    }
+                    loop {
+                        self.scopes.push(Scope { bindings: HashMap::new() });
+                        let flow = self.exec_block_inline(body)?;
+                        self.scopes.pop();
+                        match flow {
+                            Flow::Break => break,
+                            Flow::Continue | Flow::Normal => continue,
+                            Flow::Return(v) => return Ok(Flow::Return(v)),
+                            Flow::Raise(e) => return Ok(Flow::Raise(e)),
+                        }
+                    }
+                    return Ok(Flow::Normal);
+                }
                 let it = match self.eval_stmt(iter)? { Ok(v) => v, Err(f) => return Ok(f) };
                 // collect the items to iterate (snapshot — no mutation of the source during the loop)
                 let items: Vec<Value> = match it {
@@ -812,6 +838,11 @@ impl Interp {
             ExprKind::Str(s) => Ok(Value::Str(s.clone())),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::None_ => Ok(Value::None_),
+            ExprKind::Forever => Err(LingoError::new(
+                Stage::Resolve,
+                "`forever` is not a value — it can only be the iterable of `for _ in forever:`",
+                e.span,
+            )),
             ExprKind::Self_ => self.lookup("self").ok_or_else(|| {
                 LingoError::new(Stage::Runtime, "`self` is not in scope", e.span)
             }),

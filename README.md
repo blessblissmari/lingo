@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.1.25 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, **`T ! E` + `?` + match-on-result**, **f-string interpolation of `struct` / `enum` values**, **`str.trim()` + `vec[T].contains(x)`**, **`print(vec[T])` rendering vec contents**, **backwards element-type inference for `let mut x = vec[]`**, and **C-keyword-safe local identifiers** (lingo `long`, `register`, etc. survive lowering). 35/35 integration tests green.
+> ⚠️ **status:** v0.1.26 — bootstrap interpreter, **working C backend**, **interactive REPL**, **owning vec + push/pop/set**, **traits + enum methods (static dispatch)**, **monomorphized `vec[Struct]` / `vec[Enum]`**, **`for ch in str:` UTF-8 codepoint iteration**, **`T ! E` + `?` + match-on-result**, **f-string interpolation of `struct` / `enum` values**, **`str.trim()` + `vec[T].contains(x)`**, **`print(vec[T])` rendering vec contents**, **backwards element-type inference for `let mut x = vec[]`**, **C-keyword-safe local identifiers** (lingo `long`, `register`, etc. survive lowering), and **`for _ in forever:` infinite loops** (interp + native). 39/39 integration tests green.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -136,12 +136,12 @@ fn main():
 9. **traits for behaviour, structs for data.** no inheritance.
 10. **native backend + monomorphized generics** → target: within 10% of zig.
 
-## what works today (v0.1.16)
+## what works today (v0.1.26)
 
 ### interpreter
 
 - `fn` / `let` / `let mut` (no shadowing)
-- `if` / `elif` / `else`, `for x in iter:` (ranges and collections), `return` / `break` / `continue`
+- `if` / `elif` / `else`, `for x in iter:` (ranges and collections), `for _ in forever:` (infinite loop), `return` / `break` / `continue`
 - arithmetic, comparison, boolean ops, `**`, `%`
 - structs + methods, enums + `match`, traits + `impl T for U` (incl. default methods)
 - `vec[T]` literals, `map[K, V]` literals + methods (`.len`, `.has`, `.get`, `.set`, `.keys`, `.values`, `.contains`, `.remove`, `.clear`)
@@ -178,6 +178,7 @@ shells out to `cc` to produce a native binary. supported today:
 
 native-capable:
 [`hello`](compiler/examples/hello.lingo) ·
+[`forever`](compiler/examples/forever.lingo) ·
 [`fib`](compiler/examples/fib.lingo) ·
 [`math`](compiler/examples/math.lingo) ·
 [`point`](compiler/examples/point.lingo) ·

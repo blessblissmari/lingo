@@ -1056,9 +1056,30 @@ impl Codegen {
                 }
             }
             Stmt::For { var, iter, body, span } => {
-                // Two shapes supported:
-                //   `for i in lo..hi`  — integer range
-                //   `for x in vec_i64` — iterate a vec[i64]
+                // Three shapes supported:
+                //   `for _ in forever:` — infinite loop (while(1))
+                //   `for i in lo..hi`   — integer range
+                //   `for x in vec_i64`  — iterate a vec[i64] / vec[str] / vec[Struct] / ...
+                if matches!(iter.kind, ExprKind::Forever) {
+                    if var != "_" {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!(
+                                "`for {} in forever:` is not allowed — the loop variable must be `_` because `forever` yields no value",
+                                var
+                            ),
+                            iter.span,
+                        ));
+                    }
+                    writeln!(self.body, "{}while (1) {{", self.pad()).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    for s in &body.stmts { self.emit_stmt(s)?; }
+                    self.scopes.pop();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                    return Ok(());
+                }
                 match &iter.kind {
                     ExprKind::Range(a, b) => {
                         let (lo_code, _) = self.gen_expr(a)?;
@@ -1834,6 +1855,13 @@ impl Codegen {
                 return Err(LingoError::new(
                     Stage::Resolve,
                     "C backend: `none` lands in v0.2 with options",
+                    e.span,
+                ));
+            }
+            ExprKind::Forever => {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    "`forever` is not a value — it can only be the iterable of `for _ in forever:`",
                     e.span,
                 ));
             }
