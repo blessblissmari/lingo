@@ -243,29 +243,106 @@ impl Codegen {
 
     /// Compile a whole program to a self-contained C99 source file.
     pub fn gen_program(mut self, prog: &Program) -> Result<String, LingoError> {
-        // Bail fast on anything the C backend can't handle.
+        // v0.1.18: traits + `impl Trait for Type` are lowered to ordinary
+        // `Item::Impl` blocks (static dispatch only — no `&dyn` polymorphism
+        // yet).  Required methods come from the impl block; missing methods
+        // with a default impl come from the trait decl.  After lowering, the
+        // rest of codegen sees a program with only Fn/Const/Struct/Enum/Impl.
+        //
+        // No vtable, no boxing — calls like `p.show()` dispatch statically
+        // via the mangled `Point_show(p)` C function, exactly like plain impl
+        // methods.  This is enough for every real use of traits we have in
+        // the corpus (and matches Rust's "static dispatch by default").
+        let mut traits: HashMap<String, TraitDecl> = HashMap::new();
         for item in &prog.items {
-            match item {
-                Item::Fn(_) | Item::Const(_) | Item::Struct(_) | Item::Impl(_) | Item::Enum(_) => {}
-                _ => {
-                    let span = match item {
-                        Item::Trait(t) => t.span,
-                        Item::ImplTrait(b) => b.span,
-                        _ => Span::dummy(),
-                    };
+            if let Item::Trait(t) = item {
+                if traits.insert(t.name.clone(), t.clone()).is_some() {
                     return Err(LingoError::new(
                         Stage::Resolve,
-                        "C backend: `trait` and `impl Trait for Type` need \
-                         v0.2 vtable lowering. Use the interpreter for now.",
-                        span,
+                        format!("duplicate trait `{}`", t.name),
+                        t.span,
                     ));
                 }
+            }
+        }
+        let mut lowered_items: Vec<Item> = Vec::with_capacity(prog.items.len());
+        let mut seen_pair: HashMap<(String, String), Span> = HashMap::new(); // (trait, target)
+        for item in &prog.items {
+            match item {
+                Item::Trait(_) => { /* drop: pure declaration, lowered above */ }
+                Item::ImplTrait(b) => {
+                    let trait_decl = traits.get(&b.trait_name).cloned().ok_or_else(|| {
+                        LingoError::new(
+                            Stage::Resolve,
+                            format!("`impl {} for {}` refers to unknown trait `{}`",
+                                    b.trait_name, b.target, b.trait_name),
+                            b.span,
+                        )
+                    })?;
+                    let key = (b.trait_name.clone(), b.target.clone());
+                    if let Some(prev) = seen_pair.insert(key, b.span) {
+                        let _ = prev;
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("duplicate `impl {} for {}`", b.trait_name, b.target),
+                            b.span,
+                        ));
+                    }
+                    let mut impl_by_name: HashMap<String, FnDecl> = HashMap::new();
+                    for m in &b.methods {
+                        if !trait_decl.methods.iter().any(|tm| tm.decl.name == m.name) {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("method `{}` is not part of trait `{}`",
+                                        m.name, b.trait_name),
+                                m.span,
+                            ));
+                        }
+                        if impl_by_name.insert(m.name.clone(), m.clone()).is_some() {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("duplicate method `{}.{}` in impl {} for {}",
+                                        b.trait_name, m.name, b.trait_name, b.target),
+                                m.span,
+                            ));
+                        }
+                    }
+                    let mut methods: Vec<FnDecl> = Vec::with_capacity(trait_decl.methods.len());
+                    for tm in &trait_decl.methods {
+                        if let Some(m) = impl_by_name.get(&tm.decl.name) {
+                            methods.push(m.clone());
+                        } else if tm.has_default {
+                            methods.push(tm.decl.clone());
+                        } else {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("`impl {} for {}` missing required method `{}`",
+                                        b.trait_name, b.target, tm.decl.name),
+                                b.span,
+                            ));
+                        }
+                    }
+                    lowered_items.push(Item::Impl(ImplBlock {
+                        target: b.target.clone(),
+                        methods,
+                        span: b.span,
+                    }));
+                }
+                other => lowered_items.push(other.clone()),
+            }
+        }
+        // From here on, `lowered_items` is the source of truth.
+        let items: &[Item] = &lowered_items;
+        for item in items {
+            match item {
+                Item::Fn(_) | Item::Const(_) | Item::Struct(_) | Item::Impl(_) | Item::Enum(_) => {}
+                _ => unreachable!("trait/impl-trait should be lowered above"),
             }
         }
 
         // Pass 0: register enums (names only) so struct fields / fn params /
         // return types can reference them.
-        for item in &prog.items {
+        for item in items {
             if let Item::Enum(e) = item {
                 self.enums.insert(e.name.clone(), e.clone());
             }
@@ -273,7 +350,7 @@ impl Codegen {
 
         // Pass 1a: register struct shapes (forward declaration of fields).
         // We do this *first* so subsequent passes can recognize struct types.
-        for item in &prog.items {
+        for item in items {
             if let Item::Struct(s) = item {
                 let mut fields = Vec::with_capacity(s.fields.len());
                 for f in &s.fields {
@@ -285,7 +362,7 @@ impl Codegen {
             }
         }
         // Pass 1b: now resolve field types (every struct name is known).
-        for item in &prog.items {
+        for item in items {
             if let Item::Struct(s) = item {
                 let mut fields = Vec::with_capacity(s.fields.len());
                 for f in &s.fields {
@@ -296,7 +373,7 @@ impl Codegen {
             }
         }
         // Pass 1c: emit `typedef struct { ... } Name;` for each struct.
-        for item in &prog.items {
+        for item in items {
             if let Item::Struct(s) = item {
                 writeln!(self.type_defs, "typedef struct {} {{", s.name).unwrap();
                 for (fname, fty) in &self.structs[&s.name] {
@@ -319,7 +396,7 @@ impl Codegen {
         //     } T;
         // Nullary variants get an empty struct (allowed in GNU/clang C; for
         // strict C99 we keep at least a dummy field).
-        let enum_decls: Vec<EnumDecl> = prog.items.iter().filter_map(|it| {
+        let enum_decls: Vec<EnumDecl> = items.iter().filter_map(|it| {
             if let Item::Enum(e) = it { Some(e.clone()) } else { None }
         }).collect();
         for e in &enum_decls {
@@ -348,14 +425,16 @@ impl Codegen {
         }
 
         // Pass 2: collect function signatures (free + impl methods).
-        for item in &prog.items {
+        for item in items {
             match item {
                 Item::Fn(f) => self.register_fn_sig(f, None)?,
                 Item::Impl(blk) => {
-                    if !self.structs.contains_key(&blk.target) {
+                    if !self.structs.contains_key(&blk.target)
+                        && !self.enums.contains_key(&blk.target)
+                    {
                         return Err(LingoError::new(
                             Stage::Resolve,
-                            format!("C backend: impl target `{}` must be a struct", blk.target),
+                            format!("C backend: impl target `{}` must be a struct or enum", blk.target),
                             blk.span,
                         ));
                     }
@@ -368,7 +447,7 @@ impl Codegen {
         }
 
         // Pass 3: emit prototypes and bodies.
-        for item in &prog.items {
+        for item in items {
             match item {
                 Item::Fn(f) => {
                     let proto = self.fn_proto(&f.name, f)?;
@@ -446,7 +525,13 @@ impl Codegen {
                     "C backend: `self` only allowed inside `impl Type:` blocks",
                     p.span,
                 ))?;
-                params.push(CType::Struct(target.to_string()));
+                // `self`'s type is the impl target — could be a struct or an
+                // enum (both have tagged-union typedefs emitted in pass 1).
+                if self.enums.contains_key(target) {
+                    params.push(CType::Enum(target.to_string()));
+                } else {
+                    params.push(CType::Struct(target.to_string()));
+                }
             } else {
                 params.push(map_type_with(&p.ty, p.span, Some(&self.structs), Some(&self.enums))?);
             }
@@ -1434,6 +1519,10 @@ impl Codegen {
                 let needle = arg_str(self, 0)?;
                 Ok((format!("lingo_str_ends_with({}, {})", recv_code, needle), CType::Bool))
             }
+            ("to_upper", 0) => Ok((
+                format!("lingo_str_to_upper({})", recv_code), CType::Str)),
+            ("to_lower", 0) => Ok((
+                format!("lingo_str_to_lower({})", recv_code), CType::Str)),
             ("split", 1) => {
                 // `s.split(sep)` returns `vec[str]`.  The runtime helper allocs
                 // both the backing array of `const char*` and each piece.
@@ -1718,38 +1807,39 @@ impl Codegen {
                         return self.gen_str_method(&probe.0, method, args, span);
                     }
                 }
-                // Static call when the receiver is a known struct name.
+                // Static call when the receiver is a known type name (struct
+                // or enum that has no variant by this method's name — enum
+                // ctors are dispatched above).  Otherwise instance method.
                 if let ExprKind::Ident(id) = &receiver.kind {
                     if self.structs.contains_key(id) {
                         (format!("{}_{}", id, method), None)
                     } else {
-                        // free-fn-like field call would be a value method
                         let (r_code, r_ty) = self.gen_expr(receiver)?;
-                        let struct_name = match &r_ty {
-                            CType::Struct(n) => n.clone(),
+                        let type_name = match &r_ty {
+                            CType::Struct(n) | CType::Enum(n) => n.clone(),
                             _ => {
                                 return Err(LingoError::new(
                                     Stage::Resolve,
-                                    format!("C backend: method `{}` on non-struct receiver", method),
+                                    format!("C backend: method `{}` on non-struct/enum receiver", method),
                                     span,
                                 ));
                             }
                         };
-                        (format!("{}_{}", struct_name, method), Some(r_code))
+                        (format!("{}_{}", type_name, method), Some(r_code))
                     }
                 } else {
                     let (r_code, r_ty) = self.gen_expr(receiver)?;
-                    let struct_name = match &r_ty {
-                        CType::Struct(n) => n.clone(),
+                    let type_name = match &r_ty {
+                        CType::Struct(n) | CType::Enum(n) => n.clone(),
                         _ => {
                             return Err(LingoError::new(
                                 Stage::Resolve,
-                                format!("C backend: method `{}` on non-struct receiver", method),
+                                format!("C backend: method `{}` on non-struct/enum receiver", method),
                                 span,
                             ));
                         }
                     };
-                    (format!("{}_{}", struct_name, method), Some(r_code))
+                    (format!("{}_{}", type_name, method), Some(r_code))
                 }
             }
             _ => {
@@ -1940,6 +2030,33 @@ static bool lingo_str_ends_with(const char* s, const char* suffix) {
     size_t ls = strlen(s), lsuf = strlen(suffix);
     if (lsuf > ls) return false;
     return memcmp(s + (ls - lsuf), suffix, lsuf) == 0;
+}
+
+/* ASCII case conversion — heap-allocated, leaks like the rest.  UTF-8 case
+ * folding is a v0.2 concern (interp's `str.to_upper` is also ASCII-only). */
+__attribute__((unused))
+static const char* lingo_str_to_upper(const char* s) {
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in str_to_upper\\n\"); exit(1); }
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        out[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : (char)c;
+    }
+    out[n] = '\\0';
+    return out;
+}
+__attribute__((unused))
+static const char* lingo_str_to_lower(const char* s) {
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in str_to_lower\\n\"); exit(1); }
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+    }
+    out[n] = '\\0';
+    return out;
 }
 
 /* Split `s` by non-empty `sep` and return a `lingo_vec_str_t` of malloc'd
