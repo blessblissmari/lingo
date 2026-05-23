@@ -21,22 +21,23 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let (mode, path) = match args[1].as_str() {
+    let (mode, path, prog_args) = match args[1].as_str() {
         "--tokens" => {
             if args.len() < 3 {
                 eprintln!("--tokens needs a file");
                 return ExitCode::from(2);
             }
-            (Mode::Tokens, args[2].clone())
+            (Mode::Tokens, args[2].clone(), Vec::new())
         }
         "--ast" => {
             if args.len() < 3 {
                 eprintln!("--ast needs a file");
                 return ExitCode::from(2);
             }
-            (Mode::Ast, args[2].clone())
+            (Mode::Ast, args[2].clone(), Vec::new())
         }
-        _ => (Mode::Run, args[1].clone()),
+        // everything after the .lingo file becomes the program's `args()`.
+        _ => (Mode::Run, args[1].clone(), args[2..].to_vec()),
     };
 
     let source = match std::fs::read_to_string(&path) {
@@ -48,7 +49,7 @@ fn main() -> ExitCode {
     };
 
     match mode {
-        Mode::Run => match lingoc::run(&source, &path) {
+        Mode::Run => match lingoc::run_with_argv(&source, &path, prog_args) {
             Ok(_) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("{msg}");
