@@ -768,38 +768,76 @@ impl Codegen {
                         // Bind the iterable to a temp so we evaluate once even if it's
                         // a compound literal like `vec[1,2,3]`.
                         let (iter_code, iter_ty) = self.gen_expr(iter)?;
-                        let elem_ty = match &iter_ty {
-                            CType::Vec(inner) => (**inner).clone(),
+                        match &iter_ty {
+                            CType::Vec(inner) => {
+                                let elem_ty = (**inner).clone();
+                                let vec_c = iter_ty.c_decl();
+                                let elem_c = elem_ty.c_decl();
+                                let tmp = format!("__it_{}", self.tmp_counter);
+                                self.tmp_counter += 1;
+                                writeln!(self.body, "{}{} {} = {};",
+                                         self.pad(), vec_c, tmp, iter_code).unwrap();
+                                let ix = self.tmp_counter;
+                                self.tmp_counter += 1;
+                                writeln!(self.body,
+                                    "{}for (int64_t __ix_{ix} = 0; __ix_{ix} < {tmp}.len; ++__ix_{ix}) {{",
+                                    self.pad(), ix = ix).unwrap();
+                                self.indent += 1;
+                                writeln!(self.body,
+                                    "{}{} {var} = {tmp}.data[__ix_{ix}];",
+                                    self.pad(), elem_c, ix = ix).unwrap();
+                                self.scopes.push(HashMap::new());
+                                self.scopes.last_mut().unwrap().insert(var.clone(), elem_ty);
+                                for s in &body.stmts { self.emit_stmt(s)?; }
+                                self.scopes.pop();
+                                self.indent -= 1;
+                                writeln!(self.body, "{}}}", self.pad()).unwrap();
+                            }
+                            CType::Str => {
+                                // `for ch in s:` — UTF-8 codepoint iteration.
+                                // We don't decode into u32; we just slice each codepoint
+                                // into a small per-iteration buffer and bind `ch` as
+                                // `const char*` pointing into it.  This matches the
+                                // interpreter (each `ch` is a 1-codepoint `str`).
+                                let n = self.tmp_counter;
+                                self.tmp_counter += 1;
+                                writeln!(self.body, "{}const char* __s_{n} = {iter};",
+                                         self.pad(), n=n, iter=iter_code).unwrap();
+                                writeln!(self.body, "{}for (size_t __i_{n} = 0; __s_{n}[__i_{n}] != '\\0'; ) {{",
+                                         self.pad(), n=n).unwrap();
+                                self.indent += 1;
+                                writeln!(self.body, "{}unsigned char __c0_{n} = (unsigned char)__s_{n}[__i_{n}];",
+                                         self.pad(), n=n).unwrap();
+                                writeln!(self.body, "{}int __cl_{n} = (__c0_{n} < 0x80) ? 1 : \
+                                                              ((__c0_{n} >> 5) == 0x6) ? 2 : \
+                                                              ((__c0_{n} >> 4) == 0xE) ? 3 : \
+                                                              ((__c0_{n} >> 3) == 0x1E) ? 4 : 1;",
+                                         self.pad(), n=n).unwrap();
+                                writeln!(self.body, "{}char __chbuf_{n}[5] = {{0,0,0,0,0}};",
+                                         self.pad(), n=n).unwrap();
+                                writeln!(self.body, "{}for (int __k_{n} = 0; __k_{n} < __cl_{n}; ++__k_{n}) \
+                                                     __chbuf_{n}[__k_{n}] = __s_{n}[__i_{n} + (size_t)__k_{n}];",
+                                         self.pad(), n=n).unwrap();
+                                writeln!(self.body, "{}const char* {var} = __chbuf_{n};",
+                                         self.pad(), var=var, n=n).unwrap();
+                                self.scopes.push(HashMap::new());
+                                self.scopes.last_mut().unwrap().insert(var.clone(), CType::Str);
+                                for s in &body.stmts { self.emit_stmt(s)?; }
+                                self.scopes.pop();
+                                writeln!(self.body, "{}__i_{n} += (size_t)__cl_{n};",
+                                         self.pad(), n=n).unwrap();
+                                self.indent -= 1;
+                                writeln!(self.body, "{}}}", self.pad()).unwrap();
+                            }
                             other => {
                                 return Err(LingoError::new(
                                     Stage::Resolve,
-                                    format!("C backend: `for` needs a range or vec, got `{}`",
+                                    format!("C backend: `for` needs a range, vec or str, got `{}`",
                                             other.c_decl()),
                                     *span,
                                 ));
                             }
-                        };
-                        let vec_c = iter_ty.c_decl();
-                        let elem_c = elem_ty.c_decl();
-                        let tmp = format!("__it_{}", self.tmp_counter);
-                        self.tmp_counter += 1;
-                        writeln!(self.body, "{}{} {} = {};",
-                                 self.pad(), vec_c, tmp, iter_code).unwrap();
-                        let ix = self.tmp_counter;
-                        self.tmp_counter += 1;
-                        writeln!(self.body,
-                            "{}for (int64_t __ix_{ix} = 0; __ix_{ix} < {tmp}.len; ++__ix_{ix}) {{",
-                            self.pad(), ix = ix).unwrap();
-                        self.indent += 1;
-                        writeln!(self.body,
-                            "{}{} {var} = {tmp}.data[__ix_{ix}];",
-                            self.pad(), elem_c, ix = ix).unwrap();
-                        self.scopes.push(HashMap::new());
-                        self.scopes.last_mut().unwrap().insert(var.clone(), elem_ty);
-                        for s in &body.stmts { self.emit_stmt(s)?; }
-                        self.scopes.pop();
-                        self.indent -= 1;
-                        writeln!(self.body, "{}}}", self.pad()).unwrap();
+                        }
                     }
                 }
             }
