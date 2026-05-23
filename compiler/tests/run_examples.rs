@@ -114,6 +114,20 @@ unique words: 9
 }
 
 #[test]
+fn traits() {
+    let (stdout, stderr, code) = run("traits.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+origin=(1, 2)
+ORIGIN=(1, 2)
+cat says MEOW
+dog says WOOF
+cow says MOO
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
 fn tour() {
     let (stdout, stderr, code) = run("tour.lingo");
     assert_eq!(code, 0, "stderr: {stderr}");
