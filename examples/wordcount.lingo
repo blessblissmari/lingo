@@ -1,0 +1,27 @@
+# count words in a file, print the top 10.
+# demonstrates: file io, error propagation with `?`,
+# hashmap, iterator combinators, sorting.
+
+use fs
+use str
+use iter
+
+fn count_words(path: str) -> map[str, u64] ! IoError:
+    let text = fs.read_to_string(path)?
+    let mut counts: map[str, u64] = map{}
+    for word in text.split_whitespace():
+        let key = word.to_lower()
+        counts[key] = counts.get(key).unwrap_or(0) + 1
+    return counts
+
+fn main(args: [str]) ! IoError:
+    if args.len() < 2:
+        print("usage: wordcount <file>")
+        return
+    let counts = count_words(args[1])?
+    let top = counts
+        .iter()
+        .sort_by(|a, b| b.1 <=> a.1)
+        .take(10)
+    for (word, n) in top:
+        print(f"{n:>6}  {word}")
