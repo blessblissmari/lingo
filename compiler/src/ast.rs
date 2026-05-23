@@ -49,6 +49,7 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct TypeRef {
     pub name: String,
+    pub type_args: Vec<TypeRef>, // e.g. `vec[int]` or `map[str, int]`
     pub span: Span,
 }
 
@@ -198,6 +199,7 @@ pub enum ExprKind {
         name: String,
         fields: Vec<(String, Expr)>,
     },
+    VecLit(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
