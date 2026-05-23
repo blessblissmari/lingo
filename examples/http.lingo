@@ -1,0 +1,22 @@
+# a tiny http server. demonstrates structured concurrency via `nursery`,
+# explicit errors, and the (sketched) stdlib api.
+
+use net
+use http
+
+fn handle(req: http.Request) -> http.Response:
+    match (req.method, req.path):
+        (.Get, "/"):
+            return http.Response.ok("hello from lingo")
+        (.Get, "/health"):
+            return http.Response.ok("ok")
+        _:
+            return http.Response.not_found()
+
+fn main() ! net.Error:
+    let listener = net.tcp.listen("0.0.0.0:8080")?
+    print("listening on :8080")
+
+    with nursery() as n:
+        for conn in listener.incoming():
+            n.spawn(|| http.serve(conn?, handle))
