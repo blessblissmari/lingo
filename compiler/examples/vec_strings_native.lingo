@@ -1,0 +1,35 @@
+# vec[T] generic in the C backend: T ∈ {i64, f64, str}.
+# Also demos `s.split(sep) -> vec[str]`.
+
+fn sum_floats(xs: vec[f64]) -> f64:
+    let mut total = 0.0
+    for x in xs:
+        total = total + x
+    return total
+
+fn longest(words: vec[str]) -> str:
+    let mut best = ""
+    let mut best_len = 0
+    for w in words:
+        let n = w.len()
+        if n > best_len:
+            best = w
+            best_len = n
+    return best
+
+fn main():
+    let ints = vec[1, 2, 3, 4]
+    let floats = vec[0.5, 1.5, 2.5]
+    let words = vec["zig", "rust", "lingo", "go"]
+
+    print("ints.len:", ints.len())
+    print("ints[2]:", ints.get(2))
+    print("floats.sum:", sum_floats(floats))
+    print("words[0]:", words.get(0))
+    print("longest:", longest(words))
+
+    let line = "fast,simple,obvious"
+    let parts = line.split(",")
+    print("parts.len:", parts.len())
+    for p in parts:
+        print("- " + p)
