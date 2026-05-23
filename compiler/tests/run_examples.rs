@@ -227,6 +227,29 @@ fn c_backend_enums_match_interp() {
 }
 
 #[test]
+fn c_backend_debug_print_native() {
+    let Some((stdout, stderr, code)) = run_native("debug_print.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "User{id: 1, name: \"ada\", active: true}\nevent: Event.Login\nevent: Event.Message(\"hi\", 42)\n"
+    );
+}
+
+#[test]
+fn c_backend_point_native() {
+    // Same Point example the interp test uses, but the native formatter prints
+    // `0` instead of `0.0` for whole-valued doubles (libc `%g`).  Pin the exact
+    // native output here and let the cross-check ride once we share a printer.
+    let Some((stdout, stderr, code)) = run_native("point.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "a: Point{x: 0, y: 0}\nb: Point{x: 3, y: 4}\ndist: 5\norigin: Point{x: 0, y: 0}\n"
+    );
+}
+
+#[test]
 fn c_backend_floats_native() {
     // f64 ops compile + run.  We don't yet share a float print-format with the
     // interpreter (interp uses Rust's `{}` -> "5.0", native uses `%g` -> "5"),
