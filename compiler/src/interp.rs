@@ -1574,6 +1574,33 @@ impl Interp {
                 };
                 Ok(Some(Value::Result_(Rc::new(result))))
             }
+            "float" => {
+                // v0.2.4: float(str) -> float ! str   — parse an f64
+                //
+                // Shape mirrors `int(x)` (v0.2.0): identity / int->float /
+                // bool->float / str->parse.  `s.trim().parse::<f64>()`
+                // accepts the same grammar rust accepts (`1.5`, `1e9`,
+                // `-3`, `inf`, `nan`...).  Error string is byte-identical
+                // to the C backend's `lingo_float_parse` failure message:
+                //   `float: can't parse "<rust-debug-repr>"`
+                let vals = positional(self)?;
+                if self.pending_raise.is_some() { return Ok(Some(Value::None_)); }
+                if vals.len() != 1 {
+                    return Err(LingoError::new(Stage::Runtime,
+                        format!("`float(x)` expects 1 arg, got {}", vals.len()), call_span));
+                }
+                let result: std::result::Result<Value, Value> = match &vals[0] {
+                    Value::Float(f) => Ok(Value::Float(*f)),
+                    Value::Int(n) => Ok(Value::Float(*n as f64)),
+                    Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                    Value::Str(s) => match s.trim().parse::<f64>() {
+                        Ok(f) => Ok(Value::Float(f)),
+                        Err(_) => Err(Value::Str(format!("float: can't parse {:?}", s))),
+                    },
+                    v => Err(Value::Str(format!("float: can't convert {}", v.type_name()))),
+                };
+                Ok(Some(Value::Result_(Rc::new(result))))
+            }
             "str" => {
                 // str(x) -> str   — convert any value to its display form
                 let vals = positional(self)?;

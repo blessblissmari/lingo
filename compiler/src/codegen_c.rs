@@ -399,6 +399,10 @@ impl Codegen {
         // `int(s)`.  Both the typedef and the helper are
         // `__attribute__((unused))`, so the C compiler won't complain.
         self.result_pairs.insert(("i64".to_string(), "str".to_string()));
+        // v0.2.4: same dance for `lingo_result_f64_str_t` so the
+        // `lingo_float_parse` runtime helper compiles in every translation
+        // unit, even when no user code calls `float(s)`.
+        self.result_pairs.insert(("f64".to_string(), "str".to_string()));
         // v0.2.1: always reserve `lingo_opt_i64_t` + `lingo_opt_i64_str` so
         // the runtime helper splice has a typedef to reference even if no
         // user code uses `map[str, int].get`.  Same `__attribute__((unused))`
@@ -3188,6 +3192,33 @@ impl Codegen {
                     )),
                 }
             }
+            // v0.2.4: builtin `float(x)` — same shape as `int(x)`.
+            //   - `float(s: str) -> float ! str`   parse via lingo_float_parse
+            //   - `float(n: int) -> float`         widening cast
+            //   - `float(f: float) -> float`       identity
+            //   - `float(b: bool) -> float`        0.0/1.0
+            if name == "float" && args.len() == 1 && args[0].name.is_none() {
+                let (arg_code, arg_ty) = self.gen_expr(&args[0].value)?;
+                match arg_ty {
+                    CType::Str => {
+                        // Register the (f64, str) result pair so the typedef
+                        // gets emitted even if no user fn declares `! str`.
+                        self.result_pairs.insert(("f64".to_string(), "str".to_string()));
+                        return Ok((
+                            format!("lingo_float_parse({})", arg_code),
+                            CType::Result(Box::new(CType::F64), Box::new(CType::Str)),
+                        ));
+                    }
+                    CType::F64 => return Ok((arg_code, CType::F64)),
+                    CType::I64 => return Ok((format!("(double)({})", arg_code), CType::F64)),
+                    CType::Bool => return Ok((format!("(({}) ? 1.0 : 0.0)", arg_code), CType::F64)),
+                    other => return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `float(x)` not supported for argument type `{}`", other.c_decl()),
+                        span,
+                    )),
+                }
+            }
         }
         // Three call shapes we recognize:
         //   1. `foo(args)`            — free function
@@ -3739,6 +3770,60 @@ static lingo_result_i64_str_t lingo_int_parse(const char* s) {
         r.is_err = true; r.err = msg; return r;
     }
     r.ok = (int64_t)v; return r;
+}
+
+/* v0.2.4: parse an f64 from a string.  Mirrors the interpreter builtin
+ * float(s) -> float!str exactly: leading/trailing ASCII whitespace is
+ * trimmed (same as Rust str::trim for ASCII), the parse must consume
+ * every remaining character.  Grammar follows strtod (`1.5`, `1e9`,
+ * `-3`, `inf`, `nan`, ...) which matches Rust's f64::from_str closely
+ * enough for the ASCII subset we care about.  On failure we emit
+ * `float: can't parse \"<rust-debug-repr-of-original>\"` to match
+ * `format!(\"float: can't parse {:?}\", s)` in the interpreter.  Error
+ * strings are heap-allocated and leak on purpose (same policy as
+ * lingo_int_parse).
+ */
+__attribute__((unused))
+static lingo_result_f64_str_t lingo_float_parse(const char* s) {
+    lingo_result_f64_str_t r;
+    r.is_err = false; r.ok = 0.0; r.err = NULL;
+    const char* orig = (s != NULL) ? s : \"\";
+
+    const char* a = orig;
+    while (*a == ' ' || *a == '\\t' || *a == '\\n' || *a == '\\r') a++;
+    const char* b = a + strlen(a);
+    while (b > a && (b[-1]==' ' || b[-1]=='\\t' || b[-1]=='\\n' || b[-1]=='\\r')) b--;
+
+    bool fail = false;
+    double v = 0.0;
+    if (a == b) {
+        fail = true;
+    } else {
+        size_t n = (size_t)(b - a);
+        char* trimmed = (char*)malloc(n + 1);
+        if (!trimmed) { fprintf(stderr, \"lingo: oom in lingo_float_parse\\n\"); exit(1); }
+        memcpy(trimmed, a, n);
+        trimmed[n] = 0;
+        char* end = NULL;
+        errno = 0;
+        v = strtod(trimmed, &end);
+        if (end != trimmed + n || errno == ERANGE) fail = true;
+        free(trimmed);
+    }
+
+    if (fail) {
+        size_t cap = strlen(orig) * 4 + 32;
+        char* repr = (char*)malloc(cap);
+        if (!repr) { fprintf(stderr, \"lingo: oom in lingo_float_parse\\n\"); exit(1); }
+        lingo_str_debug_escape(orig, repr, cap);
+        size_t mcap = strlen(repr) + 32;
+        char* msg = (char*)malloc(mcap);
+        if (!msg) { fprintf(stderr, \"lingo: oom in lingo_float_parse\\n\"); exit(1); }
+        snprintf(msg, mcap, \"float: can't parse %s\", repr);
+        free(repr);
+        r.is_err = true; r.err = msg; return r;
+    }
+    r.ok = v; return r;
 }
 
 /* Two-pass snprintf into a fresh heap buffer.  Returned `const char*` leaks
