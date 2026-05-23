@@ -28,6 +28,31 @@ pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
     Impl(ImplBlock),
+    Trait(TraitDecl),
+    ImplTrait(ImplTraitBlock),
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitDecl {
+    pub name: String,
+    /// Required method signatures (no body) + optional default-impl methods (with body).
+    pub methods: Vec<TraitMethod>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    /// `decl.body` is empty for required methods, populated for default impls.
+    pub decl: FnDecl,
+    pub has_default: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImplTraitBlock {
+    pub trait_name: String,
+    pub target: String,
+    pub methods: Vec<FnDecl>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
