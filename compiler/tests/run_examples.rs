@@ -672,6 +672,47 @@ fn c_backend_floats_native() {
 }
 
 #[test]
+fn parse_int_interp() {
+    // v0.2.0: `int(s) -> int!str` builtin — interp side.  Pinned format
+    // is the canonical "one debug-print form": error strings come
+    // through as `int: can't parse "<rust-debug-repr>"`.
+    let (stdout, stderr, code) = run("parse_int.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "ok: 42\n\
+         err: int: can't parse \"hello\"\n\
+         ok: -7\n\
+         err: int: can't parse \"\"\n\
+         sum: 7\n\
+         err: int: can't parse \"oops\"\n",
+    );
+}
+
+#[test]
+fn c_backend_parse_int_native() {
+    // v0.2.0: the C backend's `int(s)` lowers to `lingo_int_parse(...)`,
+    // returning the monomorphized `lingo_result_i64_str_t`.  Error
+    // messages route through `lingo_str_debug_escape` so the wire
+    // format matches Rust's `Debug for &str` and the interpreter
+    // byte-for-byte.  Also exercises `?` on `! str` and match-binding
+    // the error string into an f-string.
+    let Some((stdout, stderr, code)) = run_native("parse_int.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("parse_int.lingo");
+    assert_eq!(stdout, interp_out, "native parse_int drifted from interp");
+    assert_eq!(
+        stdout,
+        "ok: 42\n\
+         err: int: can't parse \"hello\"\n\
+         ok: -7\n\
+         err: int: can't parse \"\"\n\
+         sum: 7\n\
+         err: int: can't parse \"oops\"\n",
+    );
+}
+
+#[test]
 fn io_roundtrip() {
     let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
     assert_eq!(code, 0, "stderr: {stderr}");
