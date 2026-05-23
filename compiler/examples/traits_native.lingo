@@ -1,0 +1,47 @@
+# traits give types a shared vocabulary.  v0.1.18: this whole file
+# compiles to native C — static dispatch on structs *and* enums.
+
+trait Show:
+    fn show(self) -> str
+    fn shout(self) -> str:
+        # default impl — types that don't override get this.
+        return self.show().to_upper()
+
+struct Point:
+    label: str
+    x: i64
+    y: i64
+
+enum Animal:
+    Cat
+    Dog
+    Cow
+
+impl Show for Point:
+    fn show(self) -> str:
+        return f"{self.label}=({self.x}, {self.y})"
+
+impl Show for Animal:
+    fn show(self) -> str:
+        match self:
+            Animal.Cat: return "cat"
+            Animal.Dog: return "dog"
+            Animal.Cow: return "cow"
+    fn shout(self) -> str:
+        # override the default with a custom shout.
+        match self:
+            Animal.Cat: return "MEOW"
+            Animal.Dog: return "WOOF"
+            Animal.Cow: return "MOO"
+
+fn main():
+    let p = Point{label: "origin", x: 1, y: 2}
+    print(p.show())
+    print(p.shout())            # uses Show's default impl
+
+    let c = Animal.Cat
+    let d = Animal.Dog
+    let w = Animal.Cow
+    print(f"{c.show()} says {c.shout()}")
+    print(f"{d.show()} says {d.shout()}")
+    print(f"{w.show()} says {w.shout()}")
