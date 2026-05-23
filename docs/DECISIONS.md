@@ -307,3 +307,145 @@ grammar. user-defined types are `PascalCase`.
 this is the one place we accept *two* shapes — but the split is mechanical:
 "is it a keyword? lowercase. otherwise PascalCase." an llm gets this right
 the first time.
+
+---
+
+## v0.2 — decisions added during the 0.2.x line
+
+every entry below was implemented and shipped between v0.2.0 and v0.2.7.
+the form is the same as everywhere else in this file: one rule, one
+mechanism, no exceptions.
+
+### parsing builtins return a real fallible: `int(s) -> int ! str`, `float(s) -> float ! str` (v0.2.0, v0.2.4)
+
+```lingo
+let n: int = int("42")?           # ok, n = 42
+let bad: int = int("oops")?       # raises str "oops"
+let f: float = float("3.14")?     # ok
+```
+
+- both interp and native back ends share one shape: `T ! str` with the
+  *input* as the message.  no separate `ParseError` enum, no nested
+  `Result`, no two-step "is it a number first?" — one call returns
+  either the value or the offending string.
+- consequence: a typo in source goes through the same `?` propagation
+  path as any other domain error.  no special-casing of parse failures
+  in user code.
+
+### `map.get(k) -> Opt[T]` (v0.2.1)
+
+```lingo
+let m = map[str, int]{}
+match m.get("missing"):
+    Some(v): print(v)
+    None:    print("not there")
+```
+
+- `Opt[T]` is the language's option type.  `map.get` is the *one* place
+  where it's exposed in the v0.1 stdlib (before v0.2 there was a native
+  C-backend quirk: missing key returned `0`).
+- decision: lift the quirk.  one shape across backends — even if the C
+  backend has to thread an extra discriminant.  reader doesn't care.
+
+### `? else <expr>` — error-type coercion at the call site (v0.2.2)
+
+```lingo
+fn parse_port(s: str) -> int ! str:
+    return int(s)? else "bad port"
+```
+
+- when calling `f()? ` inside a function whose declared raise type
+  doesn't match `f`'s raise type, you must say *how* to coerce.  `else`
+  is the one form.
+- this is sugar.  it's only there because we wanted the more general
+  mechanism in v0.2.3 (`impl From[E1] for E2:`) to feel optional, not
+  mandatory, for the small cases.
+
+### `impl From[E1] for E2:` — auto-wrapping `?` (v0.2.3)
+
+```lingo
+enum AppError:
+    Io(IoError)
+    Parse(str)
+
+impl From[IoError] for AppError:
+    fn from(e: IoError) -> AppError:
+        return AppError.Io(e)
+
+fn load(path: str) -> Config ! AppError:
+    let bytes = fs.read(path)?    # IoError auto-wraps via From impl
+    return parse(bytes)?
+```
+
+- this is the "obvious mechanism" promised in §2 (one named error type
+  per function).  `?` looks up `From[source_E] for target_E` and calls
+  it implicitly.  no operator overloading, no implicit conversion ladder
+  — exactly one trait, exactly one direction.
+- `From` was originally parser-magic.  v0.2.5 made it a regular generic
+  trait, declared through the same machinery as anything user code
+  writes.  *one* path for built-in and user-defined generic traits.
+
+### user-defined generic traits — `trait Foo[T1, T2, ...]:` (v0.2.5)
+
+```lingo
+trait Bag[T]:
+    fn put(self, v: T) -> Self
+    fn first(self) -> T
+
+impl Bag[int] for IntBag:
+    fn put(self, v: int) -> IntBag: ...
+    fn first(self) -> int: ...
+```
+
+- bracket type-params declared once on the trait, supplied per-impl as
+  `impl Foo[A1, A2] for Receiver:`.  arity is checked uniformly.
+- before v0.2.5 the only generic trait was the parser-magic `From[E]`.
+  after v0.2.5 user code uses the same mechanism, and `From` is just
+  one declaration in the prelude.
+
+### trait method signature substitution (v0.2.6)
+
+- when an `impl Trait[A1, A2] for Target:` block is resolved, each
+  trait method's declared signature is substituted (`type_params[i] ->
+  trait_args[i]` and `Self -> Target`) and matched structurally against
+  the impl method's signature.  per-param types, return type, and
+  `! E` raises clause all compared — including nested args like
+  `vec[T]` becoming `vec[int]`.
+- diagnostics are shaped per case:
+  - ``method `Encoder.encode` for `IntEnc`: parameter `v` expected `int`, got `str` ``
+  - ``method `Encoder.encode` for `IntEnc`: return type expected `str`, got `int` ``
+  - ``method `Parse.parse` for `P`: raises clause expected `str`, got `int` ``
+- the alternative ("lenient conformance — only check method names") was
+  what v0.2.5 actually shipped.  it let typos in impl method
+  signatures silently miscompile.  this is the rule: at resolve time,
+  the impl block must structurally match the trait, or the resolver
+  refuses to lower it.
+
+### one source of truth for type-equality + substitution (v0.2.6 plumbing)
+
+- `subst_typeref`, `typeref_eq`, `typeref_display`, `build_trait_subst`,
+  `check_trait_method_sig` all live in `ast.rs` and are used identically
+  by `interp.rs` and `codegen_c.rs`.  there is no second implementation
+  of "are these two types the same?" — adding one would be a layering
+  violation.  if a future check needs to compare types, it calls
+  `typeref_eq` (or extends it, in one place).
+
+### default-impl methods skip signature checks (v0.2.6 corollary)
+
+- if an impl block omits a method that the trait provides as a default
+  body, the resolver uses the trait method directly.  there is nothing
+  to compare — the body and signature are both the trait's.  this is
+  *not* a hole in the signature check; it's the absence of an impl
+  method to check against.
+
+### no overloading, no SFINAE, no specialization
+
+- a generic trait is parameterised by its type args.  two impls can
+  exist for the same trait only on different `(trait_args, target)`
+  tuples.  there is no "more specific wins".  there is no
+  `impl<T> Foo[T] for Bar where ...:`.  the resolver looks up by
+  structural equality of `(trait_name, trait_args, target)` and finds
+  exactly zero or one match.
+- this rules out a class of bugs (which impl did i actually get?) at
+  the cost of expressivity we don't need yet.
+

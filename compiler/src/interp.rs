@@ -186,6 +186,12 @@ enum Flow {
     Continue,
 }
 
+impl Default for Interp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Interp {
     pub fn new() -> Self {
         Self {
@@ -549,7 +555,7 @@ impl Interp {
         }
         let saved = std::mem::take(&mut self.scopes);
         self.scopes.push(Scope { bindings: HashMap::new() });
-        for (p, v) in decl.params.iter().zip(args.into_iter()) {
+        for (p, v) in decl.params.iter().zip(args) {
             self.scopes.last_mut().unwrap().bindings.insert(
                 p.name.clone(),
                 Binding { value: v, is_mut: p.name == "self" }, // self.field = ... allowed

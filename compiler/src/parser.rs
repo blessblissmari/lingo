@@ -714,7 +714,7 @@ impl Parser {
                     Tok::Ident(s) => s,
                     _ => unreachable!(),
                 };
-                let first_upper = first_name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+                let first_upper = first_name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
                 if self.eat(Tok::Dot) {
                     let v_tok = self.expect(Tok::Ident("".into()), "variant name after `.`")?;
                     let variant = match v_tok.tok {
@@ -1286,7 +1286,7 @@ impl Parser {
                 }
                 // struct literal: `Name{field: value, ...}` (only if Name starts uppercase)
                 if self.at(Tok::LBrace)
-                    && s.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                    && s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                 {
                     self.advance(); // consume `{`
                     let mut fields = Vec::new();

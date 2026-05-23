@@ -369,6 +369,12 @@ pub struct Codegen {
     from_impls: HashMap<(String, String), String>,
 }
 
+impl Default for Codegen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Codegen {
     pub fn new() -> Self {
         Self {
@@ -781,7 +787,7 @@ impl Codegen {
         out.push_str("#include <stdlib.h>\n"); // malloc (str runtime, v0.1.13)
         out.push_str("#include <stdarg.h>\n"); // va_list (lingo_fmt_alloc, v0.1.13)
         out.push_str("#include <errno.h>\n"); // strtoll's ERANGE (lingo_int_parse, v0.2.0)
-        out.push_str("\n");
+        out.push('\n');
         // Tiny built-in runtime types — typedef'd up front so user code and
         // generated method calls can refer to them by name.  Read-only vec
         // for v0.1.12: data lifetime tracks the enclosing C block.  When the
@@ -801,7 +807,7 @@ impl Codegen {
         // prelude.
         out.push_str("/* === lingo runtime helpers === */\n");
         out.push_str(&self.protos);
-        out.push_str("\n");
+        out.push('\n');
         out.push_str(&self.body);
         Ok(out)
     }
@@ -2918,8 +2924,8 @@ impl Codegen {
     ///   - `m.len()`        -> i64
     ///   - `m.has(k)`       -> bool
     ///   - `m.get(k)`       -> i64   (returns 0 if missing; native quirk!
-    ///                                 interp returns `none`.  Always `has`-
-    ///                                 check first if you need to distinguish.)
+    ///     interp returns `none`.  Always `has`-
+    ///     check first if you need to distinguish.)
     ///   - `m.set(k, v)`    -> void  (mutates — receiver must be an addressable lvalue)
     ///   - `m.keys()`       -> vec[str]
     ///
