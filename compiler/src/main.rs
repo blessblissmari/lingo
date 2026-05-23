@@ -99,6 +99,7 @@ fn main() -> ExitCode {
                 .arg("-O2").arg("-std=c99").arg("-Wall")
                 .arg(&c_path)
                 .arg("-o").arg(&out_bin)
+                .arg("-lm") // libm for pow/sqrt/etc — only needed once we lower f64 ops
                 .status();
             match status {
                 Ok(s) if s.success() => {
