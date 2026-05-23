@@ -76,6 +76,38 @@ contains 'cat'? false
 }
 
 #[test]
+fn greet() {
+    let (stdout, stderr, code) = run("greet.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+hello, артём! you are 27 years old.
+next year you'll be 28.
+point = Point{x: 3, y: 4}, sum = 7
+the answer is {42} = {42}
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn wordcount() {
+    let (stdout, stderr, code) = run("wordcount.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+unique words: 9
+  the: 3
+  quick: 2
+  brown: 1
+  fox: 2
+  jumps: 1
+  over: 1
+  lazy: 1
+  dog: 1
+  is: 1
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
 fn parse_port() {
     let (stdout, stderr, code) = run("parse_port.lingo");
     assert_eq!(code, 0, "stderr: {stderr}");
