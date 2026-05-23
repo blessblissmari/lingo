@@ -46,3 +46,28 @@ fn math() {
     let expected = "sum of squares 1..5: 55\nneg zero pos\n1024 1 3\n";
     assert_eq!(stdout, expected);
 }
+
+#[test]
+fn point() {
+    let (stdout, stderr, code) = run("point.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+a: Point{x: 0.0, y: 0.0}
+b: Point{x: 3.0, y: 4.0}
+dist: 5.0
+origin: Point{x: 0.0, y: 0.0}
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn shapes() {
+    let (stdout, stderr, code) = run("shapes.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "\
+circle area: 12.56636
+rect area: 12.0
+triangle area: 6.0
+";
+    assert_eq!(stdout, expected);
+}
