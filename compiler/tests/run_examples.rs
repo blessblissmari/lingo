@@ -624,39 +624,50 @@ fn c_backend_enums_match_interp() {
 
 #[test]
 fn c_backend_debug_print_native() {
+    // v0.1.29: matches the interpreter exactly — declared-order fields,
+    // unquoted strings inside struct/enum debug.  Pre-v0.1.29 this pinned
+    // `User{id: 1, name: "ada", active: true}` and `Event.Message("hi", 42)`
+    // (quoted), which disagreed with the interp's `name: ada` / `hi`.
     let Some((stdout, stderr, code)) = run_native("debug_print.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("debug_print.lingo");
+    assert_eq!(stdout, interp_out, "native debug print drifted from interp");
     assert_eq!(
         stdout,
-        "User{id: 1, name: \"ada\", active: true}\nevent: Event.Login\nevent: Event.Message(\"hi\", 42)\n"
+        "User{id: 1, name: ada, active: true}\nevent: Event.Login\nevent: Event.Message(hi, 42)\n"
     );
 }
 
 #[test]
 fn c_backend_point_native() {
-    // Same Point example the interp test uses, but the native formatter prints
-    // `0` instead of `0.0` for whole-valued doubles (libc `%g`).  Pin the exact
-    // native output here and let the cross-check ride once we share a printer.
+    // v0.1.29: the C backend's f64 print now routes through
+    // `lingo_f64_str` (shortest round-trip + forced `.0` on whole values),
+    // so this now matches the interp exactly.  Pre-v0.1.29 native showed
+    // `0` for `0.0`, breaking parity.
     let Some((stdout, stderr, code)) = run_native("point.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("point.lingo");
+    assert_eq!(stdout, interp_out, "native point output drifted from interp");
     assert_eq!(
         stdout,
-        "a: Point{x: 0, y: 0}\nb: Point{x: 3, y: 4}\ndist: 5\norigin: Point{x: 0, y: 0}\n"
+        "a: Point{x: 0.0, y: 0.0}\nb: Point{x: 3.0, y: 4.0}\ndist: 5.0\norigin: Point{x: 0.0, y: 0.0}\n"
     );
 }
 
 #[test]
 fn c_backend_floats_native() {
-    // f64 ops compile + run.  We don't yet share a float print-format with the
-    // interpreter (interp uses Rust's `{}` -> "5.0", native uses `%g` -> "5"),
-    // so this test pins the native output exactly and leaves a Phase-1.5 ticket
-    // to unify formatting.
+    // v0.1.29: native and interp now share the float formatter
+    // (`lingo_f64_str` <=> Rust's `Display`).  Pre-v0.1.29 native used
+    // `%g` (6 sig figs, no trailing .0), which clipped `3.141592653589793`
+    // to `3.14159`.  The interp side is the canonical format.
     let Some((stdout, stderr, code)) = run_native("floats_native.lingo") else { return };
     assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("floats_native.lingo");
+    assert_eq!(stdout, interp_out, "native float output drifted from interp");
     assert_eq!(
         stdout,
-        "5\n5\n3.14159\n19.635\n1024\n",
-        "native float output drifted"
+        "5.0\n5.0\n3.141592653589793\n19.634954084936208\n1024.0\n",
+        "float format drifted"
     );
 }
 

@@ -158,6 +158,25 @@ for x in iter:
 
 no `while`, no `loop`, no `do…while`. infinite loops are `for _ in forever:`.
 
+### one debug-print form (v0.1.29)
+
+`print(value)` renders a deterministic, llm-readable debug form:
+
+- **structs**: `Name{field: value, field: value, ...}` in *declaration order*
+  (not alphabetical), so a single field move in the struct definition is
+  visible at every print site.
+- **enums**: `Name.Variant` for nullary, `Name.Variant(payload, ...)` for
+  data-bearing variants.
+- **strings inside structs / enums**: rendered **unquoted** (`name: ada`),
+  same as bare `print(s)`. quote in an f-string if you need disambiguation.
+- **f64**: shortest decimal that round-trips back to the same double (rust's
+  `Display for f64`), with `.0` forced on whole-valued doubles
+  (`5.0`, never `5`) so floats stay visually distinct from ints.
+- **`vec[T]`**: `vec[a, b, c]` with each element formatted recursively.
+
+both the interpreter and the C backend produce byte-identical output;
+adding a backend without parity is a compile-error-grade regression.
+
 ### one string interpolation form
 
 ```lingo

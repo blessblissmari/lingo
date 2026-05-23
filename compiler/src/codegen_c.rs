@@ -122,7 +122,12 @@ impl CType {
         match self {
             CType::I64 => "%\" PRId64 \"",
             CType::U64 => "%\" PRIu64 \"",
-            CType::F64 => "%g",
+            // v0.1.29: top-level prints route f64 through `lingo_f64_str`,
+            // so the format string is `%s`.  Callers that need the *real*
+            // printf spec for `double` (e.g. the f-string lowering's
+            // snprintf) should branch on `CType::F64` and emit `%g` /
+            // `lingo_f64_str` explicitly.
+            CType::F64 => "%s",
             CType::Bool => "%s", // we print "true"/"false"
             CType::Str => "%s",
             CType::Void => "",
@@ -1773,7 +1778,11 @@ impl Codegen {
                     match inner.as_ref() {
                         CType::I64 => writeln!(self.body, "{}    printf(\"%\" PRId64, {});", self.pad(), elem_expr).unwrap(),
                         CType::U64 => writeln!(self.body, "{}    printf(\"%\" PRIu64, {});", self.pad(), elem_expr).unwrap(),
-                        CType::F64 => writeln!(self.body, "{}    printf(\"%g\", {});", self.pad(), elem_expr).unwrap(),
+                        // v0.1.29: vec[f64] elements use the same
+                        // shortest-round-trip formatter so `print(vec)`
+                        // matches the interpreter and the rest of the
+                        // backend.
+                        CType::F64 => writeln!(self.body, "{}    printf(\"%s\", lingo_f64_str({}));", self.pad(), elem_expr).unwrap(),
                         CType::Bool => writeln!(self.body, "{}    printf(\"%s\", ({}) ? \"true\" : \"false\");", self.pad(), elem_expr).unwrap(),
                         CType::Str => writeln!(self.body, "{}    printf(\"%s\", {});", self.pad(), elem_expr).unwrap(),
                         CType::Struct(sname) => {
@@ -1806,7 +1815,14 @@ impl Codegen {
                 }
                 _ => {
                     fmt.push_str(ty.printf_fmt());
-                    vals.push(code);
+                    // v0.1.29: f64 routes through the shortest-round-trip
+                    // helper so top-level `print(some_f64)` matches the
+                    // interpreter's `5.0` / `3.141592653589793` style.
+                    if matches!(ty, CType::F64) {
+                        vals.push(format!("lingo_f64_str({})", code));
+                    } else {
+                        vals.push(code);
+                    }
                 }
             }
         }
@@ -2037,9 +2053,16 @@ impl Codegen {
                                     fmt.push_str("%s");
                                     vals.push(code);
                                 }
-                                CType::I64 | CType::U64 | CType::F64 => {
+                                CType::I64 | CType::U64 => {
                                     fmt.push_str(ty.printf_fmt());
                                     vals.push(code);
+                                }
+                                CType::F64 => {
+                                    // v0.1.29: shortest round-trip via the
+                                    // runtime helper — same format as
+                                    // top-level `print`.
+                                    fmt.push_str("%s");
+                                    vals.push(format!("lingo_f64_str({})", code));
                                 }
                                 CType::Enum(name) => {
                                     // v0.1.22: enum interp renders as
@@ -2951,9 +2974,15 @@ fn debug_fmt_for(t: &CType) -> String {
     match t {
         CType::I64 => "%\" PRId64 \"".into(),
         CType::U64 => "%\" PRIu64 \"".into(),
-        CType::F64 => "%g".into(),
+        // v0.1.29: f64 now routes through `lingo_f64_str(...)` (shortest
+        // round-trip) so struct/enum debug output matches the interpreter.
+        CType::F64 => "%s".into(),
         CType::Bool => "%s".into(),
-        CType::Str => "\\\"%s\\\"".into(),
+        // v0.1.29: strings are NOT quoted in debug print — match the
+        // interpreter (`User{name: ada}`, not `User{name: "ada"}`).  The
+        // interp uses `Value::display` which never quotes; we now do the
+        // same.  Pre-v0.1.29 we emitted `\"%s\"` here.
+        CType::Str => "%s".into(),
         CType::Void => "".into(),
         CType::Struct(_) => "<struct>".into(),
         CType::Enum(_) => "<enum>".into(),
@@ -2966,6 +2995,8 @@ fn debug_fmt_for(t: &CType) -> String {
 fn debug_val_for(t: &CType, code: &str) -> String {
     match t {
         CType::Bool => format!("(({}) ? \"true\" : \"false\")", code),
+        // v0.1.29: route f64 through the shortest-round-trip helper.
+        CType::F64 => format!("lingo_f64_str({})", code),
         _ => code.to_string(),
     }
 }
@@ -3167,6 +3198,41 @@ static lingo_vec_str_t lingo_map_str_i64_keys(const lingo_map_str_i64_t* m) {
     if (!arr && m->len > 0) { fprintf(stderr, \"lingo: oom in map_keys\\n\"); exit(1); }
     for (int64_t i = 0; i < m->len; i++) arr[i] = m->keys[i];
     return (lingo_vec_str_t){ .data = arr, .len = m->len, .cap = m->len };
+}
+
+/* v0.1.29: shortest-round-trip f64 formatter.
+ * Matches the interpreters format_float:
+ *   - finite, whole-valued doubles  -> trailing .0 forced (e.g. 5 dot 0)
+ *   - other finite values           -> shortest decimal that round-trips
+ *                                      back to the same f64 (Rust Display)
+ *   - non-finite (nan, inf, -inf)   -> whatever the %g spec produces
+ * Uses a rotating ring of static buffers so a single printf can embed
+ * multiple f64 values without clobbering earlier slots.  32 slots covers
+ * our typical print(a, b, c) calls and struct/enum payloads.
+ */
+__attribute__((unused))
+static const char* lingo_f64_str(double x) {
+    static char bufs[32][64];
+    static int slot = 0;
+    char* buf = bufs[slot];
+    slot = (slot + 1) % 32;
+    if (!isfinite(x)) {
+        snprintf(buf, 64, \"%g\", x);
+        return buf;
+    }
+    if (x == (double)(long long)x && x > -1e18 && x < 1e18) {
+        snprintf(buf, 64, \"%lld.0\", (long long)x);
+        return buf;
+    }
+    for (int p = 1; p <= 17; p++) {
+        snprintf(buf, 64, \"%.*g\", p, x);
+        double back;
+        if (sscanf(buf, \"%lf\", &back) == 1 && back == x) {
+            return buf;
+        }
+    }
+    snprintf(buf, 64, \"%.17g\", x);
+    return buf;
 }
 
 /* Two-pass snprintf into a fresh heap buffer.  Returned `const char*` leaks

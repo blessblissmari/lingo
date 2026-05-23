@@ -35,7 +35,14 @@ pub enum Value {
     Result_(Rc<std::result::Result<Value, Value>>),
     Struct {
         type_name: String,
-        fields: HashMap<String, Value>,
+        // Stored as a Vec<(name, value)> rather than a HashMap so that
+        // debug-print iteration order is the struct's *declared* field
+        // order (not insertion order from the literal, and not
+        // hash-randomised).  Lookup is O(n) but structs are small
+        // (< ~20 fields), and this lets us match the C backend's
+        // declared-order output without dragging the struct decl into
+        // every `Value::display` call.  v0.1.29.
+        fields: Vec<(String, Value)>,
     },
     Enum {
         type_name: String,
@@ -83,11 +90,14 @@ impl Value {
                 Err(e) => format!("err({})", e.display()),
             },
             Value::Struct { type_name, fields } => {
-                let mut parts: Vec<String> = fields
+                // v0.1.29: walk in declared order (the Vec preserves it).
+                // Pre-v0.1.29 we used a HashMap + alphabetical sort, which
+                // disagreed with the C backend's declared-order printout
+                // (debug_print.lingo).
+                let parts: Vec<String> = fields
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v.display()))
                     .collect();
-                parts.sort();
                 format!("{type_name}{{{}}}", parts.join(", "))
             }
             Value::Enum { type_name, variant, payload } => {
@@ -566,7 +576,9 @@ impl Interp {
                         for scope in self.scopes.iter_mut().rev() {
                             if let Some(b) = scope.bindings.get_mut("self") {
                                 if let Value::Struct { fields, .. } = &mut b.value {
-                                    if let Some(slot) = fields.get_mut(fname) {
+                                    // v0.1.29: fields is now Vec<(String, Value)>, so
+                                    // we linear-scan for the slot.  Structs are small.
+                                    if let Some((_, slot)) = fields.iter_mut().find(|(k, _)| k == fname) {
                                         *slot = v;
                                         return Ok(Flow::Normal);
                                     }
@@ -948,9 +960,19 @@ impl Interp {
                         ));
                     }
                 }
+                // v0.1.29: materialize as a Vec in declared order so
+                // debug-print iteration order matches the struct decl
+                // (and the C backend).  `map` only existed to enforce
+                // "every field set exactly once" — we drain it back out
+                // in decl order here.
+                let ordered: Vec<(String, Value)> = decl
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), map.remove(&f.name).expect("validated above")))
+                    .collect();
                 Ok(Value::Struct {
                     type_name: name.clone(),
-                    fields: map,
+                    fields: ordered,
                 })
             }
             ExprKind::Field(lhs, name) => {
@@ -969,7 +991,7 @@ impl Interp {
                 }
                 let v = self.eval(lhs)?;
                 match v {
-                    Value::Struct { fields, .. } => fields.get(name).cloned().ok_or_else(|| {
+                    Value::Struct { fields, .. } => fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).ok_or_else(|| {
                         LingoError::new(
                             Stage::Runtime,
                             format!("no field `{}`", name),
