@@ -2100,6 +2100,8 @@ impl Codegen {
             }
             ("to_upper", 0) => Ok((
                 format!("lingo_str_to_upper({})", recv_code), CType::Str)),
+            ("trim", 0) => Ok((
+                format!("lingo_str_trim({})", recv_code), CType::Str)),
             ("to_lower", 0) => Ok((
                 format!("lingo_str_to_lower({})", recv_code), CType::Str)),
             ("split", 1) => {
@@ -2259,6 +2261,45 @@ impl Codegen {
         };
         match (method, args.len()) {
             ("len", 0) => Ok((format!("({}).len", recv_code), CType::I64)),
+            ("contains", 1) => {
+                if args[0].name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `vec.contains` takes a positional value",
+                        args[0].span,
+                    ));
+                }
+                let (x_code, x_ty) = self.gen_expr(&args[0].value)?;
+                if x_ty != elem_ty {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `vec.contains` value must be `{}`, got `{}`",
+                                elem_ty.c_decl(), x_ty.c_decl()),
+                        args[0].span,
+                    ));
+                }
+                // Bind to a temp so we don't re-evaluate the receiver per
+                // iteration; lowers into a stmt-expr that scans the data.
+                let n = self.tmp_counter;
+                self.tmp_counter += 1;
+                let cmp_expr = match &elem_ty {
+                    CType::Str => format!("strcmp(__vc_v_{n}.data[__vc_i_{n}], __vc_x_{n}) == 0", n = n),
+                    CType::I64 | CType::F64 | CType::Bool | CType::U64 => {
+                        format!("__vc_v_{n}.data[__vc_i_{n}] == __vc_x_{n}", n = n)
+                    }
+                    other => return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `vec.contains` on element type `{}` not supported yet", other.c_decl()),
+                        span,
+                    )),
+                };
+                let code = format!(
+                    "({{ {vt} __vc_v_{n} = {recv}; {et} __vc_x_{n} = {x}; bool __vc_r_{n} = false; for (size_t __vc_i_{n} = 0; __vc_i_{n} < __vc_v_{n}.len; __vc_i_{n}++) {{ if ({cmp}) {{ __vc_r_{n} = true; break; }} }} __vc_r_{n}; }})",
+                    vt = recv_ty.c_decl(), et = elem_ty.c_decl(),
+                    recv = recv_code, x = x_code, cmp = cmp_expr, n = n,
+                );
+                Ok((code, CType::Bool))
+            }
             ("get", 1) => {
                 if args[0].name.is_some() {
                     return Err(LingoError::new(
@@ -2625,6 +2666,32 @@ static const char* lingo_str_to_upper(const char* s) {
         out[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : (char)c;
     }
     out[n] = '\\0';
+    return out;
+}
+__attribute__((unused))
+static const char* lingo_str_trim(const char* s) {
+    /* Strip leading + trailing ASCII whitespace (space, tab, \\n, \\r, \\v, \\f).
+     * Returns a freshly malloc'd copy so the caller can free it.  We treat
+     * the input as bytes — the interp uses Rust's `str::trim` which strips
+     * Unicode whitespace, but for v0.1.22 ASCII covers the demo example. */
+    size_t n = strlen(s);
+    size_t lo = 0;
+    while (lo < n) {
+        unsigned char c = (unsigned char)s[lo];
+        if (!(c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\v' || c == '\\f')) break;
+        lo++;
+    }
+    size_t hi = n;
+    while (hi > lo) {
+        unsigned char c = (unsigned char)s[hi - 1];
+        if (!(c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\v' || c == '\\f')) break;
+        hi--;
+    }
+    size_t len = hi - lo;
+    char* out = (char*)malloc(len + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in str_trim\\n\"); exit(1); }
+    memcpy(out, s + lo, len);
+    out[len] = '\\0';
     return out;
 }
 __attribute__((unused))
