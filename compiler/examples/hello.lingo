@@ -1,0 +1,3 @@
+# the obligatory hello world.
+fn main():
+    print("hello, lingo")
