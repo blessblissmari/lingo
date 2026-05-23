@@ -160,10 +160,19 @@ pub struct Interp {
     /// `type -> trait -> method -> fn` table.
     /// Looked up during method dispatch when no inherent method matches.
     trait_impls: HashMap<String, HashMap<String, HashMap<String, FnDecl>>>,
+    /// v0.2.3 — `impl From[E1] for E2:` impls.  Looked up by `?` when the
+    /// inner err's runtime type doesn't match the caller's `raises` type;
+    /// the registered `from(e: E1) -> E2` wraps the err.  No `else`
+    /// fallback needed when an impl is in scope.
+    from_impls: HashMap<(String, String), FnDecl>,
     scopes: Vec<Scope>,
     /// Set by `?` when the inner result is Err. The next statement boundary
     /// converts this into a `Flow::Raise(...)` so it propagates to the caller.
     pending_raise: Option<Value>,
+    /// Stack of the currently-executing fn's `raises` type name (e.g.
+    /// `"ParseErr"`).  Pushed on fn entry if the fn has `! E`, popped on
+    /// exit.  Used by `?` to look up From impls for type coercion.
+    current_fn_raises_e: Vec<String>,
     /// Command-line args passed to the `lingo` binary, available via `args()`.
     argv: Vec<String>,
 }
@@ -187,8 +196,10 @@ impl Interp {
             methods: HashMap::new(),
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
+            from_impls: HashMap::new(),
             scopes: Vec::new(),
             pending_raise: None,
+            current_fn_raises_e: Vec::new(),
             argv: Vec::new(),
         }
     }
@@ -316,6 +327,47 @@ impl Interp {
                     self.consts.insert(c.name.clone(), v);
                 }
                 Item::ImplTrait(b) => {
+                    // v0.2.3: built-in `From[E1] for E2` — magic trait, no
+                    // user-visible `trait From` declaration needed. Register
+                    // the `from` method into a (E1_ty, E2_ty)-keyed table the
+                    // `?` operator consults when types mismatch.
+                    if b.trait_name == "From" {
+                        if b.trait_args.len() != 1 {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("`impl From[..] for {}` expects exactly one type arg, got {}",
+                                        b.target, b.trait_args.len()),
+                                b.span,
+                            ));
+                        }
+                        let from_ty = b.trait_args[0].clone();
+                        let to_ty = b.target.clone();
+                        // exactly one method, named `from`, taking (e: from_ty) -> to_ty
+                        if b.methods.len() != 1 || b.methods[0].name != "from" {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                "`impl From[..] for ..` must contain exactly one method `fn from(e: <E1>) -> <E2>`",
+                                b.span,
+                            ));
+                        }
+                        if !allow_replace && self.from_impls.contains_key(&(from_ty.clone(), to_ty.clone())) {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("duplicate `impl From[{}] for {}`", from_ty, to_ty),
+                                b.span,
+                            ));
+                        }
+                        self.from_impls.insert((from_ty, to_ty), b.methods[0].clone());
+                        continue;
+                    }
+                    if !b.trait_args.is_empty() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!("trait `{}` does not take type args (only the built-in `From` does in v0.2.3)",
+                                    b.trait_name),
+                            b.span,
+                        ));
+                    }
                     // The trait must exist.
                     let trait_decl = self.traits.get(&b.trait_name).cloned().ok_or_else(|| {
                         LingoError::new(
@@ -462,7 +514,15 @@ impl Interp {
                 Binding { value: v, is_mut: p.name == "self" }, // self.field = ... allowed
             );
         }
+        // Push the caller's raises type so `?` can find From impls.
+        let pushed_raises = decl.raises.as_ref().map(|t| t.name.clone());
+        if let Some(ref e) = pushed_raises {
+            self.current_fn_raises_e.push(e.clone());
+        }
         let flow = self.exec_block(&decl.body);
+        if pushed_raises.is_some() {
+            self.current_fn_raises_e.pop();
+        }
         self.scopes = saved;
         let is_fallible = decl.raises.is_some();
         match flow? {
@@ -1183,11 +1243,16 @@ impl Interp {
                     Value::Result_(rc) => match rc.as_ref() {
                         Ok(val) => Ok(val.clone()),
                         Err(err) => {
-                            // With `else <fb>`, raise the fallback expr's
-                            // value instead of the inner err — this is
-                            // how `?` coerces between error types in
-                            // v0.2.2.  Without `else`, the inner err
-                            // propagates as-is (v0.1.21 behaviour).
+                            // Three error-coercion paths:
+                            //   1. explicit `expr? else fb` (v0.2.2): use `fb`.
+                            //   2. types already match — propagate as-is.
+                            //   3. types differ — consult `from_impls`
+                            //      registered by `impl From[E1] for E2:`
+                            //      blocks (v0.2.3) and call the `from` fn
+                            //      to wrap the err in the caller's type.
+                            //      If no impl is in scope, propagate the
+                            //      raw err (callers can still match on it
+                            //      reflectively).
                             let raised = if let Some(fb) = fallback {
                                 let v = self.eval(fb)?;
                                 if self.pending_raise.is_some() {
@@ -1195,7 +1260,21 @@ impl Interp {
                                 }
                                 v
                             } else {
-                                err.clone()
+                                let err_ty = err.type_name();
+                                let caller_e = self.current_fn_raises_e.last().cloned();
+                                match caller_e {
+                                    Some(target) if target != err_ty => {
+                                        if let Some(from_fn) = self.from_impls
+                                            .get(&(err_ty, target))
+                                            .cloned()
+                                        {
+                                            self.call_fn(&from_fn, vec![err.clone()])?
+                                        } else {
+                                            err.clone()
+                                        }
+                                    }
+                                    _ => err.clone(),
+                                }
                             };
                             self.pending_raise = Some(raised);
                             Ok(Value::None_)
