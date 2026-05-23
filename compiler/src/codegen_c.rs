@@ -325,6 +325,12 @@ pub struct Codegen {
     /// lets without an annotation, populated by a per-fn pre-pass over the
     /// function body that looks at later `x.push(e)` calls.
     inferred_empty_vec_types: HashMap<String, CType>,
+    /// v0.1.27: names of top-level `const` decls, so `check_no_shadow` can
+    /// reject `let PI = 4` inside a fn when there's already a `const PI`
+    /// at module scope.  Stored separately from `self.scopes` because
+    /// `self.scopes` is empty during the top-level pass (fn bodies push
+    /// their own frame), so consts can't live there.
+    consts: std::collections::HashSet<String>,
 }
 
 impl Codegen {
@@ -343,6 +349,7 @@ impl Codegen {
             result_pairs: std::collections::BTreeSet::new(),
             current_fn_raises: None,
             inferred_empty_vec_types: HashMap::new(),
+            consts: std::collections::HashSet::new(),
         }
     }
 
@@ -587,6 +594,9 @@ impl Codegen {
                     writeln!(self.protos, "static {} {} = {};", ty.c_decl(), c.name, code).unwrap();
                     // top-level const becomes visible to scoped lookups
                     self.scopes.last_mut().map(|s| s.insert(c.name.clone(), ty));
+                    // v0.1.27: also record under `consts` so `check_no_shadow`
+                    // finds it even when no module-scope frame exists yet.
+                    self.consts.insert(c.name.clone());
                 }
                 Item::Struct(_) => {} // already emitted in pass 1c
                 Item::Enum(_) => {}   // already emitted in pass 1d
@@ -914,9 +924,48 @@ impl Codegen {
         "    ".repeat(self.indent)
     }
 
+    /// Reject `name` if it's already bound anywhere up the scope stack —
+    /// including the top-level const scope and the function-body scope
+    /// where params live.  This mirrors the interpreter's `let` shadowing
+    /// check (interp.rs `Stmt::Let`) so the two backends produce identical
+    /// diagnostics instead of letting `cc` complain about a redeclaration.
+    ///
+    /// Underscore `_` is the "don't bind" name and is always allowed.
+    fn check_no_shadow(&self, name: &str, span: Span) -> Result<(), LingoError> {
+        if name == "_" { return Ok(()); }
+        for scope in self.scopes.iter().rev() {
+            if scope.contains_key(name) {
+                return Err(LingoError::new(
+                    Stage::Resolve,
+                    format!("`{}` already in scope (shadowing is forbidden)", name),
+                    span,
+                ));
+            }
+        }
+        // Module-level consts live in `self.consts` (not in `self.scopes`,
+        // which is empty during the top-level pass).  Match the interpreter's
+        // wording for this specific case.
+        if self.consts.contains(name) {
+            return Err(LingoError::new(
+                Stage::Resolve,
+                format!("`{}` already declared at module scope", name),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
     fn emit_stmt(&mut self, s: &Stmt) -> Result<(), LingoError> {
         match s {
             Stmt::Let { is_mut: _, name, ty, value, span } => {
+                // v0.1.27: no-shadowing parity with the interpreter.  Without
+                // this, an outer-scope `let x` followed by an inner-block
+                // `let x` would compile fine in C (nested-block shadowing is
+                // legal C) and silently disagree with the interp, which
+                // already rejects it.  Same-scope `let x` twice would only
+                // surface as a "redefinition of 'x'" from `cc`.  Catch both
+                // here with the canonical diagnostic.
+                self.check_no_shadow(name, *span)?;
                 // Pre-compute the declared type so we can use it to type-hint
                 // an empty `vec[]` literal on the RHS (otherwise it would
                 // default to `vec[i64]` and mismatch `let v: vec[Point]`).

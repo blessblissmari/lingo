@@ -76,6 +76,97 @@ fn run_with_args(file: &str, prog_args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// v0.1.27: the C backend should reject shadowing with the same
+/// `resolve error:` diagnostic the interpreter uses, instead of letting
+/// `cc` complain about a redeclaration after the fact.  Three flavours
+/// of shadow that previously diverged: same-scope, nested-block, and
+/// param-vs-local.
+#[test]
+fn c_backend_rejects_let_shadow_same_scope() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let src = "fn main():\n    let x = 1\n    let x = 2\n    print(x)\n";
+    let path = std::env::temp_dir().join("lingo_shadow_same.lingo");
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject same-scope shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`x` already in scope (shadowing is forbidden)"),
+        "wrong diagnostic: {stderr}"
+    );
+    // belt-and-suspenders: must NOT be a cc-level error
+    assert!(!stderr.contains("redefinition of"), "leaked cc error: {stderr}");
+    assert!(!stderr.contains("cc failed"), "leaked cc failure: {stderr}");
+}
+
+#[test]
+fn c_backend_rejects_let_shadow_nested_block() {
+    // C nested-block shadowing is legal C — before v0.1.27, the C
+    // backend silently accepted this even though the interp rejected it.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let src = "fn main():\n    let x = 1\n    if x == 1:\n        let x = 2\n        print(x)\n";
+    let path = std::env::temp_dir().join("lingo_shadow_nested.lingo");
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject nested-block shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`x` already in scope (shadowing is forbidden)"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn c_backend_rejects_param_let_shadow() {
+    // Pre-v0.1.27 this surfaced as cc's "redeclared as different kind of
+    // symbol" — useless to a lingo user.  Now caught by the resolver.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let src = "fn greet(name: str):\n    let name = \"hi\"\n    print(name)\n\nfn main():\n    greet(\"world\")\n";
+    let path = std::env::temp_dir().join("lingo_shadow_param.lingo");
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject param-vs-let shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`name` already in scope (shadowing is forbidden)"),
+        "wrong diagnostic: {stderr}"
+    );
+    assert!(!stderr.contains("redeclared as different kind"), "leaked cc error: {stderr}");
+}
+
+#[test]
+fn c_backend_rejects_let_shadow_against_const() {
+    // Top-level consts live in the bottom scope frame; a function-body
+    // `let` with the same name must also be rejected.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let src = "const PI: int = 3\n\nfn main():\n    let PI = 4\n    print(PI)\n";
+    let path = std::env::temp_dir().join("lingo_shadow_const.lingo");
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject const-vs-let shadow");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`PI` already declared at module scope"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
 #[test]
 fn hello() {
     let (stdout, stderr, code) = run("hello.lingo");
