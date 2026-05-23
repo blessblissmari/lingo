@@ -11,12 +11,21 @@
 
 use crate::error::{LingoError, Span, Stage};
 
+/// One chunk of an f-string: either literal text, or a raw expression source
+/// (to be sub-parsed by the parser).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FPart {
+    Lit(String),
+    Expr(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     // literals
     Int(i64),
     Float(f64),
     Str(String),
+    FString(Vec<FPart>),
     Ident(String),
 
     // keywords
@@ -230,6 +239,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LingoError> {
                     }
                     continue;
                 }
+                if c >= 0x80 {
+                    // multi-byte UTF-8 character — copy the whole codepoint
+                    let ch = source[i..].chars().next().ok_or_else(|| {
+                        LingoError::new(Stage::Lex, "invalid UTF-8 in string", Span::new(i, i + 1))
+                    })?;
+                    let n = ch.len_utf8();
+                    s.push(ch);
+                    i += n;
+                    continue;
+                }
                 s.push(c as char);
                 i += 1;
             }
@@ -273,6 +292,131 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LingoError> {
             };
             tokens.push(Token::new(tok, Span::new(i, end)));
             i = end;
+            continue;
+        }
+
+        // f-string: `f"..."` with `{expr}` interpolation
+        if b == b'f' && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+            let start_f = i;
+            i += 2; // skip `f"`
+            let mut parts: Vec<FPart> = Vec::new();
+            let mut lit = String::new();
+            loop {
+                if i >= bytes.len() {
+                    return Err(LingoError::new(
+                        Stage::Lex,
+                        "unterminated f-string",
+                        Span::new(start_f, i),
+                    ));
+                }
+                let c = bytes[i];
+                if c == b'"' {
+                    i += 1;
+                    break;
+                }
+                if c == b'\\' {
+                    i += 1;
+                    if i >= bytes.len() {
+                        return Err(LingoError::new(
+                            Stage::Lex,
+                            "unterminated escape in f-string",
+                            Span::new(start_f, i),
+                        ));
+                    }
+                    let esc = bytes[i];
+                    i += 1;
+                    match esc {
+                        b'n' => lit.push('\n'),
+                        b't' => lit.push('\t'),
+                        b'r' => lit.push('\r'),
+                        b'\\' => lit.push('\\'),
+                        b'"' => lit.push('"'),
+                        b'{' => lit.push('{'),
+                        b'}' => lit.push('}'),
+                        b'0' => lit.push('\0'),
+                        other => {
+                            return Err(LingoError::new(
+                                Stage::Lex,
+                                format!("unknown escape '\\{}' in f-string", other as char),
+                                Span::new(i - 2, i),
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                if c == b'{' {
+                    // start of interpolated expression
+                    if !lit.is_empty() {
+                        parts.push(FPart::Lit(std::mem::take(&mut lit)));
+                    }
+                    i += 1;
+                    let expr_start = i;
+                    let mut depth = 1;
+                    while i < bytes.len() && depth > 0 {
+                        match bytes[i] {
+                            b'{' => depth += 1,
+                            b'}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            b'"' => {
+                                // skip a nested string literal so its `{` / `}` don't confuse us
+                                i += 1;
+                                while i < bytes.len() && bytes[i] != b'"' {
+                                    if bytes[i] == b'\\' {
+                                        i += 1;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    if i >= bytes.len() || bytes[i] != b'}' {
+                        return Err(LingoError::new(
+                            Stage::Lex,
+                            "unterminated `{...}` in f-string",
+                            Span::new(start_f, i),
+                        ));
+                    }
+                    let expr_src = source[expr_start..i].to_string();
+                    if expr_src.trim().is_empty() {
+                        return Err(LingoError::new(
+                            Stage::Lex,
+                            "empty `{}` in f-string",
+                            Span::new(expr_start - 1, i + 1),
+                        ));
+                    }
+                    parts.push(FPart::Expr(expr_src));
+                    i += 1; // skip `}`
+                    continue;
+                }
+                if c == b'}' {
+                    return Err(LingoError::new(
+                        Stage::Lex,
+                        "unexpected `}` in f-string (use `\\}` to escape)",
+                        Span::new(i, i + 1),
+                    ));
+                }
+                if c >= 0x80 {
+                    let ch = source[i..].chars().next().ok_or_else(|| {
+                        LingoError::new(Stage::Lex, "invalid UTF-8 in f-string", Span::new(i, i + 1))
+                    })?;
+                    let n = ch.len_utf8();
+                    lit.push(ch);
+                    i += n;
+                    continue;
+                }
+                lit.push(c as char);
+                i += 1;
+            }
+            if !lit.is_empty() {
+                parts.push(FPart::Lit(lit));
+            }
+            tokens.push(Token::new(Tok::FString(parts), Span::new(start_f, i)));
             continue;
         }
 
