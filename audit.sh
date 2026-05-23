@@ -16,13 +16,13 @@ SKIP_NATIVE[hello]=""      # placeholder; nothing skipped by default
 # Long-running benchmark — interp would take ~15s+. Native only.
 INTERACTIVE_EXAMPLES=("io_roundtrip" "fib_native_bench")
 
-# Examples that exercise interp-only features tracked for v0.2:
-#   - tour:      uses `int(s) -> int!str` parsing builtin (not in C backend)
-#   - wordcount: uses `match` on a non-enum scrutinee (map.get())
-# Both have native-friendly companions (wordcount_native.lingo) and are
-# documented as known gaps in ROADMAP.md.  We mark them explicitly here so
-# the audit summary reflects intent, not regression.
-INTERP_ONLY_EXAMPLES=("tour" "wordcount")
+# Examples that exercise interp-only features tracked for v0.2.x:
+#   - tour:      uses `int(s)?` `?` error coercion (interp lifts str → enum,
+#                C backend hasn't grown that coercion path yet).
+# `wordcount` graduated to interp ≡ native in v0.2.1 thanks to `Opt[T]`
+# support for `map.get`; the dedicated `wordcount_native.lingo` is kept as
+# the older `has`/`get` companion test point (now also `match`-based).
+INTERP_ONLY_EXAMPLES=("tour")
 is_interp_only() {
     local stem=$1
     for x in "${INTERP_ONLY_EXAMPLES[@]}"; do

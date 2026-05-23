@@ -185,6 +185,15 @@ runtime helper mirrors rust's `Debug for &str` byte-for-byte
 (`"..."` wrapping, `\"`/`\\`/`\n`/`\t`/`\r`/NUL escapes, `\xNN` for
 other ASCII control chars, non-ASCII bytes pass through).
 
+extended in v0.2.1: `Opt[T]` renders as **the inner value's display**
+when present, and **`none`** (lowercase, no quotes) when absent.  No
+`Some(...)` wrapper text — same intent as `Value::display` everywhere
+else.  Both backends agree byte-for-byte; the C backend uses a per-T
+`lingo_opt_<T>_str` runtime helper spliced after `lingo_fmt_alloc`,
+the interpreter routes through `Value::display` directly.  This is
+the v0.2.1 ground truth for `match opt: some(v): / none:` and the
+reason `wordcount.lingo` now matches across interp + native.
+
 ### one string interpolation form
 
 ```lingo

@@ -64,6 +64,13 @@ enum CType {
     /// monomorphized struct `{ bool is_err; T ok; E err; }`.  The E is
     /// always an enum (lingo's design); T can be any non-result type.
     Result(Box<CType>, Box<CType>),
+    /// `Opt[T]` — v0.2.1 — typed optional, returned by builtins that may
+    /// produce *no* value (today: `map.get(k)` only).  Lowered to a
+    /// per-T monomorphized struct `{ bool is_some; T val; }`.  Pattern
+    /// match with `none` and `some(bind | _)` to discriminate; print
+    /// renders `"none"` for absent or the inner value's printf form
+    /// for present (matching the interpreter byte-for-byte).
+    Opt(Box<CType>),
 }
 
 impl CType {
@@ -104,6 +111,7 @@ impl CType {
                 };
                 format!("lingo_result_{}_{}_t", t.mono_suffix(), e_name)
             }
+            CType::Opt(t) => format!("lingo_opt_{}_t", t.mono_suffix()),
         }
     }
 
@@ -142,6 +150,7 @@ impl CType {
             CType::Vec(_) => "<vec>",        // printed via emit_print special-case
             CType::Map(_, _) => "<map>",     // not directly printable yet
             CType::Result(_, _) => "<result>", // not directly printable
+            CType::Opt(_) => "%s",             // routed through stmt-expr (see emit_print / f-string)
         }
     }
 }
@@ -328,6 +337,12 @@ pub struct Codegen {
     /// Distinct `(T_suffix, E_name)` pairs we've seen in fn signatures.
     /// One `lingo_result_<T>_<E>_t` typedef + sentinels gets emitted per pair.
     result_pairs: std::collections::BTreeSet<(String, String)>,
+    /// v0.2.1: Distinct `T_suffix` values we've seen for `Opt[T]`.  One
+    /// `lingo_opt_<T>_t = { bool is_some; T val; }` typedef + an inline
+    /// `lingo_opt_<T>_str` formatter gets emitted per entry.  The set is
+    /// pre-seeded with `"i64"` (see `gen_program`) so the typedef exists
+    /// for `map.get` even if the user doesn't use the result.
+    opt_types: std::collections::BTreeSet<String>,
     /// While emitting a function body: its raises type, if any.  Used by
     /// `Stmt::Return`, `Stmt::Raise`, and `Try` to wrap/propagate the
     /// `lingo_result_..._t` value correctly.
@@ -358,6 +373,7 @@ impl Codegen {
             indent: 0,
             tmp_counter: 0,
             result_pairs: std::collections::BTreeSet::new(),
+            opt_types: std::collections::BTreeSet::new(),
             current_fn_raises: None,
             inferred_empty_vec_types: HashMap::new(),
             consts: std::collections::HashSet::new(),
@@ -372,6 +388,13 @@ impl Codegen {
         // `int(s)`.  Both the typedef and the helper are
         // `__attribute__((unused))`, so the C compiler won't complain.
         self.result_pairs.insert(("i64".to_string(), "str".to_string()));
+        // v0.2.1: always reserve `lingo_opt_i64_t` + `lingo_opt_i64_str` so
+        // the runtime helper splice has a typedef to reference even if no
+        // user code uses `map[str, int].get`.  Same `__attribute__((unused))`
+        // pattern as the result typedefs.  When Opt over other types lands
+        // (Opt[str], Opt[Struct], ...), add their suffixes here too — or
+        // do a pre-scan over the AST collecting `map[_, V].get` mentions.
+        self.opt_types.insert("i64".to_string());
         // v0.1.18: traits + `impl Trait for Type` are lowered to ordinary
         // `Item::Impl` blocks (static dispatch only — no `&dyn` polymorphism
         // yet).  Required methods come from the impl block; missing methods
@@ -592,6 +615,23 @@ impl Codegen {
                 "typedef struct {{ bool is_err; {t} ok; {e} err; }} {v};",
                 t = t_c, e = e_c, v = v).unwrap();
         }
+
+        // v0.2.1 — Pass 2.6: emit `lingo_opt_<T>_t` typedefs for every
+        // distinct T we've seen.  Same shape as result_pairs but the
+        // value type is the only knob (no error component).  Goes after
+        // the result typedefs so an `Opt[T!E]` would resolve (we don't
+        // actually allow nested Opt of Result yet — that's just future-proofing).
+        let opts: Vec<String> = self.opt_types.iter().cloned().collect();
+        for t_sfx in &opts {
+            let t_c = mono_suffix_to_c_decl(t_sfx, &self.structs, &self.enums);
+            writeln!(self.type_defs,
+                "typedef struct {{ bool is_some; {t} val; }} lingo_opt_{s}_t;",
+                t = t_c, s = t_sfx).unwrap();
+        }
+        // The corresponding `lingo_opt_<T>_str` helpers can't be defined
+        // here because they reference `lingo_fmt_alloc` which only exists
+        // after the runtime-helpers splice.  We emit those in the splice
+        // block itself (see the `runtime_helpers` substitution in `emit`).
 
         // Pass 3: emit prototypes and bodies.
         for item in items {
@@ -815,7 +855,8 @@ impl Codegen {
                             (CType::Vec(_), "len") => Some(CType::I64),
                             (CType::Vec(_), "contains") => Some(CType::Bool),
                             (CType::Vec(inner), "pop") => Some((**inner).clone()),
-                            (CType::Map(_, v), "get") => Some((**v).clone()),
+                            // v0.2.1: `map.get(k)` returns `Opt[V]` (was `V`).
+                            (CType::Map(_, v), "get") => Some(CType::Opt(Box::new((**v).clone()))),
                             (CType::Map(_, _), "len") => Some(CType::I64),
                             _ => None,
                         }
@@ -1320,6 +1361,10 @@ impl Codegen {
         if let CType::Result(t, e) = &scrut_ty {
             return self.emit_match_result(scrut_code, (**t).clone(), (**e).clone(), arms, span);
         }
+        // v0.2.1: Opt[T] scrutinee — `none` / `some(bind | _)` / `_` / bind.
+        if let CType::Opt(t) = &scrut_ty {
+            return self.emit_match_opt(scrut_code, (**t).clone(), arms, span);
+        }
         let enum_name = match &scrut_ty {
             CType::Enum(n) => n.clone(),
             _ => {
@@ -1706,6 +1751,156 @@ impl Codegen {
         Ok(())
     }
 
+    /// `match` lowering for `Opt[T]` scrutinees (v0.2.1).  Arms are
+    /// matched in order against a `do { ... } while(0);` chain of
+    /// `if (...) { ...; break; }` guards.  Supported patterns:
+    ///   none                // matches `!opt.is_some`
+    ///   some(bind | _)      // matches `opt.is_some`, binds inner
+    ///   _                   // catch-all
+    ///   bind_name           // catch-all that binds the whole Opt
+    /// `ok`/`err` arms are rejected with a pointed diagnostic so the
+    /// user doesn't confuse Opt and Result.
+    fn emit_match_opt(
+        &mut self,
+        scrut_code: String,
+        t: CType,
+        arms: &[MatchArm],
+        _span: Span,
+    ) -> Result<(), LingoError> {
+        let opt_ty = CType::Opt(Box::new(t.clone()));
+        let n = self.tmp_counter;
+        self.tmp_counter += 1;
+        let tmp = format!("__opt_m_{}", n);
+        writeln!(self.body, "{}{} {} = {};", self.pad(), opt_ty.c_decl(), tmp, scrut_code).unwrap();
+        // Each arm becomes an `if (cond) { ...; break; }` inside a do/while(0).
+        // The order matches source order so the first matching arm wins
+        // (consistent with the Result lowering).
+        writeln!(self.body, "{}do {{", self.pad()).unwrap();
+        self.indent += 1;
+        let mut had_catch_all = false;
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Variant { type_name, variant, sub, span: pat_span } => {
+                    if type_name.is_some() {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            "C backend: `Opt[T]` patterns are bare `none` / `some(...)` \
+                             (no `Opt.None` namespacing today)",
+                            *pat_span,
+                        ));
+                    }
+                    match variant.as_str() {
+                        "none" => {
+                            if !sub.is_empty() {
+                                return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    "`none` pattern takes no payload",
+                                    *pat_span,
+                                ));
+                            }
+                            writeln!(self.body, "{}if (!{}.is_some) {{", self.pad(), tmp).unwrap();
+                            self.indent += 1;
+                            self.scopes.push(HashMap::new());
+                            for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                            writeln!(self.body, "{}break;", self.pad()).unwrap();
+                            self.scopes.pop();
+                            self.indent -= 1;
+                            writeln!(self.body, "{}}}", self.pad()).unwrap();
+                        }
+                        "some" => {
+                            if sub.len() != 1 {
+                                return Err(LingoError::new(
+                                    Stage::Resolve,
+                                    format!("`some(...)` pattern needs exactly 1 field, got {}", sub.len()),
+                                    *pat_span,
+                                ));
+                            }
+                            writeln!(self.body, "{}if ({}.is_some) {{", self.pad(), tmp).unwrap();
+                            self.indent += 1;
+                            self.scopes.push(HashMap::new());
+                            match &sub[0] {
+                                Pattern::Wildcard(_) => {}
+                                Pattern::Bind(name, sp_span) => {
+                                    self.check_no_shadow(name, *sp_span)?;
+                                    writeln!(self.body, "{}{} {} = {}.val;",
+                                             self.pad(), t.c_decl(), c_local_ident(name), tmp).unwrap();
+                                    self.scopes.last_mut().unwrap().insert(name.clone(), t.clone());
+                                }
+                                _ => {
+                                    return Err(LingoError::new(
+                                        Stage::Resolve,
+                                        "C backend: nested patterns inside `some(...)` aren't \
+                                         supported yet (only `some(name)` or `some(_)`)",
+                                        *pat_span,
+                                    ));
+                                }
+                            }
+                            for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                            writeln!(self.body, "{}break;", self.pad()).unwrap();
+                            self.scopes.pop();
+                            self.indent -= 1;
+                            writeln!(self.body, "{}}}", self.pad()).unwrap();
+                        }
+                        "ok" | "err" => {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("`{}(...)` matches `T!E`, not `Opt[T]`. Did you mean \
+                                         `some(...)` / `none`?", variant),
+                                *pat_span,
+                            ));
+                        }
+                        other => {
+                            return Err(LingoError::new(
+                                Stage::Resolve,
+                                format!("`Opt[T]` patterns are `none` and `some(...)`, got `{}`", other),
+                                *pat_span,
+                            ));
+                        }
+                    }
+                }
+                Pattern::Wildcard(_) => {
+                    writeln!(self.body, "{}{{", self.pad()).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                    self.scopes.pop();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                    had_catch_all = true;
+                    break;
+                }
+                Pattern::Bind(name, bind_span) => {
+                    self.check_no_shadow(name, *bind_span)?;
+                    writeln!(self.body, "{}{{", self.pad()).unwrap();
+                    self.indent += 1;
+                    self.scopes.push(HashMap::new());
+                    writeln!(self.body, "{}{} {} = {};",
+                             self.pad(), opt_ty.c_decl(), c_local_ident(name), tmp).unwrap();
+                    self.scopes.last_mut().unwrap().insert(name.clone(), opt_ty.clone());
+                    for s in &arm.body.stmts { self.emit_stmt(s)?; }
+                    writeln!(self.body, "{}break;", self.pad()).unwrap();
+                    self.scopes.pop();
+                    self.indent -= 1;
+                    writeln!(self.body, "{}}}", self.pad()).unwrap();
+                    had_catch_all = true;
+                    break;
+                }
+                Pattern::Literal(_, lit_span) => {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: literal patterns on `Opt[T]` aren't supported (use `some(name)` to bind)",
+                        *lit_span,
+                    ));
+                }
+            }
+        }
+        let _ = had_catch_all; // suppress unused warning if all arms covered
+        self.indent -= 1;
+        writeln!(self.body, "{}}} while (0);", self.pad()).unwrap();
+        Ok(())
+    }
+
     fn emit_print(&mut self, args: &[Arg], span: Span) -> Result<(), LingoError> {
         // Build a single printf("fmt", ...). Multiple args separated by spaces,
         // newline at end. Bool values are converted to "true"/"false" strings.
@@ -1871,6 +2066,16 @@ impl Codegen {
                     }
                     writeln!(self.body, "{}}}", self.pad()).unwrap();
                     writeln!(self.body, "{}printf(\"]\");", self.pad()).unwrap();
+                }
+                CType::Opt(inner) => {
+                    // v0.2.1: top-level `print(opt)` routes through the
+                    // per-T `lingo_opt_<T>_str` helper so output matches
+                    // the interpreter byte-for-byte (`none` for absent,
+                    // inner value's display for present).
+                    self.opt_types.insert(inner.mono_suffix());
+                    fmt.push_str("%s");
+                    vals.push(format!("lingo_opt_{s}_str({c})",
+                                      s = inner.mono_suffix(), c = code));
                 }
                 _ => {
                     fmt.push_str(ty.printf_fmt());
@@ -2206,6 +2411,18 @@ impl Codegen {
                                     };
                                     fmt.push_str("%s");
                                     vals.push(format!("lingo_fmt_alloc(\"{}\"{})", inner_fmt, inner_args));
+                                }
+                                CType::Opt(inner) => {
+                                    // v0.2.1: f-string interpolation of
+                                    // `Opt[T]` calls the per-T `lingo_opt_<T>_str`
+                                    // helper.  Wire format matches the
+                                    // interp: `none` for absent, the inner
+                                    // value's display for present (no `Some(...)`
+                                    // wrapper text).
+                                    self.opt_types.insert(inner.mono_suffix());
+                                    fmt.push_str("%s");
+                                    vals.push(format!("lingo_opt_{s}_str({c})",
+                                                      s = inner.mono_suffix(), c = code));
                                 }
                                 other => {
                                     return Err(LingoError::new(
@@ -2625,8 +2842,27 @@ impl Codegen {
                 Ok((format!("lingo_map_str_i64_has(&({}), {})", recv_code, k), CType::Bool))
             }
             ("get", 1) => {
+                // v0.2.1: `map.get(k)` now returns `Opt[V]` (was `V`).
+                // Lowered to an inline stmt-expr that probes with `has`
+                // first and then either constructs `{ true, get(k) }` or
+                // `{ false, 0 }`.  Field `val` is left zero-initialised
+                // when absent — callers must check `is_some` before using
+                // it (the type system enforces this via `match`).
                 let k = need_str_arg(self, 0)?;
-                Ok((format!("lingo_map_str_i64_get(&({}), {})", recv_code, k), CType::I64))
+                self.opt_types.insert("i64".to_string());
+                let n = self.tmp_counter;
+                self.tmp_counter += 1;
+                let tmp_k = format!("__opt_k_{}", n);
+                let tmp_o = format!("__opt_v_{}", n);
+                let code = format!(
+                    "({{ const char* {k_var} = ({k_expr}); \
+                       lingo_opt_i64_t {o} = lingo_map_str_i64_has(&({m}), {k_var}) \
+                           ? (lingo_opt_i64_t){{ .is_some = true, .val = lingo_map_str_i64_get(&({m}), {k_var}) }} \
+                           : (lingo_opt_i64_t){{ .is_some = false, .val = 0 }}; \
+                       {o}; }})",
+                    k_var = tmp_k, k_expr = k, o = tmp_o, m = recv_code,
+                );
+                Ok((code, CType::Opt(Box::new(CType::I64))))
             }
             ("set", 2) => {
                 let ident = recv_ident.ok_or_else(|| LingoError::new(
@@ -3078,6 +3314,7 @@ fn debug_fmt_for(t: &CType) -> String {
         CType::Vec(_) => "<vec>".into(),
         CType::Map(_, _) => "<map>".into(),
         CType::Result(_, _) => "<result>".into(),
+        CType::Opt(_) => "%s".into(), // routed through `lingo_opt_<T>_str`
     }
 }
 
@@ -3426,6 +3663,20 @@ static const char* lingo_fmt_alloc(const char* fmt, ...) {
     vsnprintf(out, (size_t)n + 1, fmt, ap2);
     va_end(ap2);
     return out;
+}
+
+/* === Opt[T] formatters (v0.2.1) ===
+ * Render `Opt[T]` as a `const char*` for print / f-string interpolation.
+ * Wire format matches the interpreter byte-for-byte:
+ *   `none`       — when absent
+ *   <inner.display> — when present (no `Some(...)` wrapper)
+ * One helper per inner T.  `lingo_fmt_alloc` is used so the returned
+ * pointer is heap-allocated and lives long enough for the surrounding
+ * snprintf (same leak policy as the rest of the str runtime).
+ */
+__attribute__((unused))
+static const char* lingo_opt_i64_str(lingo_opt_i64_t o) {
+    return o.is_some ? lingo_fmt_alloc(\"%lld\", (long long)o.val) : \"none\";
 }
 
 /* === owning vec runtime (v0.1.17) ===
