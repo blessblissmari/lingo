@@ -227,6 +227,21 @@ fn c_backend_enums_match_interp() {
 }
 
 #[test]
+fn c_backend_floats_native() {
+    // f64 ops compile + run.  We don't yet share a float print-format with the
+    // interpreter (interp uses Rust's `{}` -> "5.0", native uses `%g` -> "5"),
+    // so this test pins the native output exactly and leaves a Phase-1.5 ticket
+    // to unify formatting.
+    let Some((stdout, stderr, code)) = run_native("floats_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "5\n5\n3.14159\n19.635\n1024\n",
+        "native float output drifted"
+    );
+}
+
+#[test]
 fn io_roundtrip() {
     let (stdout, stderr, code) = run_with_args("io_roundtrip.lingo", &["a", "b", "c"]);
     assert_eq!(code, 0, "stderr: {stderr}");
