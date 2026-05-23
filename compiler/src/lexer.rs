@@ -41,6 +41,11 @@ pub enum Tok {
     Continue,
     None_,
     As,
+    Struct,
+    Enum,
+    Impl,
+    Match,
+    Self_,
     Print, // builtin name, treated like an identifier but reserved
 
     // punctuation / operators
@@ -297,6 +302,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LingoError> {
                 "continue" => Tok::Continue,
                 "none" => Tok::None_,
                 "as" => Tok::As,
+                "struct" => Tok::Struct,
+                "enum" => Tok::Enum,
+                "impl" => Tok::Impl,
+                "match" => Tok::Match,
+                "self" => Tok::Self_,
                 "print" => Tok::Print,
                 other => Tok::Ident(other.to_string()),
             };
