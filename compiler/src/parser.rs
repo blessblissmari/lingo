@@ -575,12 +575,43 @@ impl Parser {
 
     fn type_ref(&mut self) -> Result<TypeRef, LingoError> {
         let t = self.expect(Tok::Ident("".into()), "type name")?;
-        let name = match t.tok {
+        let mut name = match t.tok {
             Tok::Ident(s) => s,
             _ => unreachable!(),
         };
-        let mut type_args = Vec::new();
         let mut end = t.span.end;
+        // v0.3.1: cross-module type ref `alias.Name` (e.g. `bar.Point`
+        // in `fn f() -> bar.Point`).  We accept exactly one `.IDENT`
+        // suffix here — the resolver splits on the dot to look up the
+        // imported module and prefix the last segment.  Deeper paths
+        // (`a.b.C`) are rejected so the rule stays "one module hop".
+        if self.at(Tok::Dot) {
+            // Save position so a stray `.something` in a non-type-ref
+            // context can rewind cleanly.  In practice the only caller
+            // is `type_ref()` which is always in a type position, so
+            // commit unconditionally and produce a precise error.
+            self.advance(); // `.`
+            let seg_tok = self.expect(
+                Tok::Ident("".into()),
+                "type name after `.` in cross-module type ref",
+            )?;
+            let seg = match seg_tok.tok {
+                Tok::Ident(s) => s,
+                _ => unreachable!(),
+            };
+            if self.at(Tok::Dot) {
+                return Err(LingoError::new(
+                    Stage::Parse,
+                    "cross-module type refs are one hop only (`alias.Name`); \
+                     nested module paths like `a.b.C` are not supported yet"
+                        .to_string(),
+                    self.peek().span,
+                ));
+            }
+            name = format!("{name}.{seg}");
+            end = seg_tok.span.end;
+        }
+        let mut type_args = Vec::new();
         if self.eat(Tok::LBracket) {
             if !self.at(Tok::RBracket) {
                 loop {
@@ -1288,6 +1319,54 @@ impl Parser {
             }
             Tok::Ident(s) => {
                 self.advance();
+                // v0.3.1: cross-module struct literal `alias.Name{...}`.
+                // Detect with three-token lookahead so a regular postfix
+                // field access (`bar.x`, `bar.Color.Red`) still works
+                // through the normal path.  We only consume the dotted
+                // name when the *very next* token after it is `{`,
+                // because that's the only place a struct literal can
+                // sit syntactically.
+                if self.at(Tok::Dot)
+                    && self.pos + 2 < self.tokens.len()
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(ref n) if n.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+                    && matches!(self.tokens[self.pos + 2].tok, Tok::LBrace)
+                {
+                    self.advance(); // `.`
+                    let name_tok = self.advance(); // upper-cased Ident
+                    let segname = match name_tok.tok {
+                        Tok::Ident(n) => n,
+                        _ => unreachable!(),
+                    };
+                    self.advance(); // `{`
+                    let mut fields = Vec::new();
+                    if !self.at(Tok::RBrace) {
+                        loop {
+                            let fname_tok = self
+                                .expect(Tok::Ident("".into()), "field name in struct literal")?;
+                            let fname = match fname_tok.tok {
+                                Tok::Ident(s) => s,
+                                _ => unreachable!(),
+                            };
+                            self.expect(Tok::Colon, "`:` after field name")?;
+                            let val = self.expr()?;
+                            fields.push((fname, val));
+                            if !self.eat(Tok::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(
+                        Tok::RBrace,
+                        "`}` to close cross-module struct literal",
+                    )?;
+                    return Ok(Expr {
+                        kind: ExprKind::StructLit {
+                            name: format!("{s}.{segname}"),
+                            fields,
+                        },
+                        span: Span::new(tok.span.start, close.span.end),
+                    });
+                }
                 // vec literal: `vec[a, b, c]`
                 if s == "vec" && self.at(Tok::LBracket) {
                     self.advance(); // consume `[`

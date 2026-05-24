@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.3.0 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x (owning vec, traits + generic traits + signature substitution, `T ! E` errors with `?` / `? else <fb>` / `impl From[E1] for E2:`, `Opt[T]` from `map.get`, etc.).  **New in v0.3.0: multi-file modules.**  `import foo` reads `foo.lingo` next to the entry file; `import foo.bar` reads `foo/bar.lingo`; `import foo as f` renames the alias.  the alias is the only way to reach another module's top-level names (`f.fn()`, `f.CONST`, `f.MyEnum.Variant`) — no namespace pollution, no re-exports, no `import *`.  cycle detection (`a.lingo -> b.lingo -> a.lingo`) and duplicate-alias / missing-target diagnostics are mandatory, not opt-in.  the resolver flattens every transitively-reachable file into one `Program` before the interp / C backend runs, so both backends keep working on a single program just like v0.2.x.  76/76 integration tests green; **36/38 applicable examples** produce byte-identical output across interp + native (the two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  **deferred to v0.3.x:** cross-module *type references* (`fn f() -> bar.Point`) and cross-module struct literals (`bar.Point{}`).
+> ⚠️ **status:** v0.3.1 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  **Modules (v0.3.0):** `import foo` reads `foo.lingo`; `import foo.bar` reads `foo/bar.lingo`; `import foo as f` renames the alias.  The alias is the only way to reach another module's top-level names — `f.fn()`, `f.CONST`, `f.MyEnum.Variant`.  Cycle / duplicate-alias / missing-target diagnostics are mandatory.  **Cross-module types (v0.3.1):** `fn f() -> bar.Point`, `let p: bar.Point = ...`, `vec[bar.Point]`, and `bar.Point{x: 1, y: 2}` all work — the resolver rewrites every dotted reference to a flat ident before the interp / C backend runs, so both backends keep working on one flat program.  Parser limit: one module hop (`a.b.C` rejected).  Unknown alias is a clean resolver-time error.  80/80 integration tests green; **37/39 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  No re-exports, no `import *`, no privacy.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -176,13 +176,15 @@ shells out to `cc` to produce a native binary. supported today:
 
 ### examples
 
-**multi-file (v0.3.0)** — every entry file is `main.lingo` inside its
+**multi-file (v0.3.0+)** — every entry file is `main.lingo` inside its
 own directory; the resolver follows `import` lines to sibling
-`.lingo` files:
+`.lingo` files.  v0.3.1 adds cross-module types
+(`fn f() -> bar.Point`, `bar.Point{x: 1}`):
 [`modules_basic`](compiler/examples/modules_basic/main.lingo) ·
 [`modules_alias`](compiler/examples/modules_alias/main.lingo) ·
 [`modules_nested`](compiler/examples/modules_nested/main.lingo) ·
-[`modules_enum`](compiler/examples/modules_enum/main.lingo)
+[`modules_enum`](compiler/examples/modules_enum/main.lingo) ·
+[`modules_xmod_types`](compiler/examples/modules_xmod_types/main.lingo)
 
 native-capable:
 [`hello`](compiler/examples/hello.lingo) ·

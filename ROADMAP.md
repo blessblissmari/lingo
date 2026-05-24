@@ -111,9 +111,34 @@ programs aren't forced to live in one `.lingo` file.
   `modules_nested`, `modules_enum`), 7 new integration tests +
   3 negative diagnostic tests = 76/76 green; audit 36/38
   byte-identical (2 still interactive).  clippy 0 warnings.
-  **deferred to v0.3.x:** cross-module *type references*
+  ~~**deferred to v0.3.x:** cross-module *type references*
   (`fn f() -> bar.Point`) and cross-module struct literals
-  (`bar.Point{}`).
+  (`bar.Point{}`).~~ — landed in v0.3.1.
+
+- [x] **Cross-module type refs and struct literals (v0.3.1)**:
+  closes the v0.3.0 deferred items.  `fn f() -> bar.Point`,
+  `let p: bar.Point = ...`, `vec[bar.Point]`, and
+  `bar.Point{x: 1, y: 2}` all parse and resolve correctly.
+  parser change: `type_ref()` accepts one `.IDENT` suffix after
+  a leading ident (deeper paths are a parse-time error: "cross-
+  module type refs are one hop only").  in expression position,
+  a three-token lookahead (`Dot IDENT(upper) LBrace`) routes
+  `alias.Name{...}` straight into a `StructLit` with name
+  `"alias.Name"`; every other dotted form still flows through
+  the existing postfix path.  resolver-side: a single change to
+  `RewriteCtx::maybe_prefix_typename` splits dotted names on
+  `.`, looks the alias up in `self.imports`, and resolves the
+  last segment through `prefix_by_canonical`.  unknown aliases
+  are recorded via a `RefCell<Vec<LingoError>>` on the ctx and
+  surfaced at the end of the rewrite pass — clean failure
+  instead of leaving a dotted name to confuse the backends.
+  the interp and the C backend are untouched: by the time they
+  run, every reference is a flat `lm{i}__Name` ident.
+  new example `modules_xmod_types/` ({geom.lingo, main.lingo})
+  exercising cross-module return type + struct literal + struct
+  arg.  3 new tests (1 positive interp+native pin, 2 negative
+  diagnostic: unknown alias + two-hop reject).  80/80 green;
+  audit 37/39 byte-identical.  clippy 0 warnings.
 
 then the stdlib itself, a deliberately small core:
 

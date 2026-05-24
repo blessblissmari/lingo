@@ -1,0 +1,11 @@
+# 2-D point lives in its own module; the entry file constructs and
+# consumes it across the import boundary.
+struct Point:
+    x: int
+    y: int
+
+fn origin() -> Point:
+    return Point{x: 0, y: 0}
+
+fn dx(a: Point, b: Point) -> int:
+    return b.x - a.x

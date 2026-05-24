@@ -503,3 +503,33 @@ impl Bag[int] for IntBag:
 - users never see, write, or import a mangled name.  the prefix
   exists only to keep the flat program collision-free; if you want
   to call `math.add` you write `math.add`.
+
+### cross-module type refs and struct literals are dotted, one hop only (v0.3.1)
+
+- `fn f() -> bar.Point`, `let p: bar.Point = ...`, `vec[bar.Point]`
+  and `bar.Point{x: 1}` all work in v0.3.1.  this finishes the
+  v0.3.0 modules surface — code in one file can now name and
+  construct types from another file without an intermediate
+  constructor helper.
+- the parser accepts exactly **one** `.IDENT` suffix after a
+  type-position identifier.  deeper paths like `a.b.Point` are a
+  hard parse error (`cross-module type refs are one hop only`).
+  reason: lingo modules don't nest.  `import a.b` already means
+  "the file `a/b.lingo` reached through one alias", not "module
+  `b` inside module `a`".  letting the type surface suggest
+  otherwise would confuse the reader.
+- in expression position, `alias.Name{...}` is consumed as a
+  struct literal exactly when the three-token lookahead is
+  `Dot IDENT(uppercase) LBrace`.  every other `alias.thing` form
+  (field access, function call, enum-variant access) still goes
+  through the regular postfix path — the new branch only fires
+  when there is unambiguously a struct literal to build.
+- the resolver rewrites every `alias.Name` reference to the flat
+  `lm{i}__Name` form before the interp / C backend runs, so neither
+  backend ever sees a dotted name.  this is the same approach
+  v0.3.0 took for cross-module function and constant references —
+  modules stay a *front-end* concern.
+- an unknown alias (`other.Point` when `other` was never
+  imported) is rejected at resolver time with a precise
+  diagnostic (``cannot resolve `other.Point`: `other` is not an
+  import in this module``).  no silent passthrough.
