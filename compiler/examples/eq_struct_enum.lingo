@@ -1,0 +1,45 @@
+# v0.3.2: structural `==` and `!=` on struct/enum values.
+# Before v0.3.2, `Point{x:1} == Point{x:1}` was a type error — equality
+# was only defined for primitives (int, bool, str, float).  This example
+# pins the new behaviour:
+#   - field-wise eq on structs (recurses through nested struct/enum fields)
+#   - tag + payload eq on enums
+#   - element-wise eq on vec[T] when T is itself eq-able
+
+struct Inner:
+    label: str
+    n: int
+
+struct Outer:
+    inner: Inner
+    flag: bool
+
+enum Shape:
+    Dot
+    Line(int, int)
+    Box(Inner)
+
+fn main():
+    let a = Outer{inner: Inner{label: "x", n: 1}, flag: true}
+    let b = Outer{inner: Inner{label: "x", n: 1}, flag: true}
+    let c = Outer{inner: Inner{label: "x", n: 2}, flag: true}
+    print(a == b)
+    print(a == c)
+    print(a != c)
+
+    let s1 = Shape.Line(3, 4)
+    let s2 = Shape.Line(3, 4)
+    let s3 = Shape.Line(3, 5)
+    let s4 = Shape.Dot
+    let s5 = Shape.Box(Inner{label: "y", n: 7})
+    let s6 = Shape.Box(Inner{label: "y", n: 7})
+    print(s1 == s2)
+    print(s1 == s3)
+    print(s1 == s4)
+    print(s5 == s6)
+
+    let v1 = vec[1, 2, 3]
+    let v2 = vec[1, 2, 3]
+    let v3 = vec[1, 2, 4]
+    print(v1 == v2)
+    print(v1 == v3)

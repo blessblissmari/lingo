@@ -1180,3 +1180,40 @@ fn modules_reject_two_hop_dotted_type() {
         "diagnostic should explain the one-hop rule: {stderr}"
     );
 }
+
+// ---------- v0.3.2: structural `==` / `!=` on struct / enum / vec ----------
+
+#[test]
+fn eq_struct_enum() {
+    let (stdout, stderr, code) = run("eq_struct_enum.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "true\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\nfalse\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn eq_struct_enum_native() {
+    let Some((stdout, stderr, code)) = run_native("eq_struct_enum.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("eq_struct_enum.lingo");
+    assert_eq!(stdout, interp_out, "interp ≡ native byte-identical");
+}
+
+#[test]
+fn eq_struct_mismatched_kinds_errors() {
+    // Comparing a struct value against a non-struct (or two different
+    // struct types) should still be a type error — we only opened up
+    // *same-type* structural equality.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let dir = std::env::temp_dir().join("lingo_eq_mismatched_kinds");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.lingo");
+    std::fs::write(
+        &entry,
+        "struct P:\n    x: int\nfn main():\n    let p = P{x: 1}\n    print(p == 1)\n",
+    )
+    .unwrap();
+    let out = Command::new(bin).arg(&entry).output().expect("run lingo");
+    assert!(!out.status.success(), "should reject struct == int");
+}

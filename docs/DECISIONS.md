@@ -533,3 +533,39 @@ impl Bag[int] for IntBag:
   imported) is rejected at resolver time with a precise
   diagnostic (``cannot resolve `other.Point`: `other` is not an
   import in this module``).  no silent passthrough.
+
+### `==` is structural for user types, but only when the user types are made of structural things (v0.3.2)
+
+- `Point{x: 1} == Point{x: 1}` is now `true`.  before v0.3.2 it
+  was a type error — the operator only handled `int`/`bool`/
+  `str`/`float`.  match-on-enum already used structural eq
+  internally (via `values_eq`), so this just lifts that same
+  rule to the operator surface.
+- struct eq: same nominal type, then field-wise `==` (recursing
+  through struct/enum/vec fields).  enum eq: same `tag` first,
+  then payload-wise on the matched variant.  `vec[T]` eq: same
+  `len`, then element-wise.  field name order is the struct's
+  *declared* order; users can rely on that for byte-identical
+  C output (already pinned by the audit).
+- `Map`, `Result`, `Opt` deliberately do **not** get structural
+  eq.  ordering on a hash-table is the wrong default (you'd
+  need to canonicalise, which is footgunny), and `Result`/`Opt`
+  comparisons almost always want a `match` to discriminate
+  variant first — adding `==` would invite "is this Ok?" code
+  written as `r == Ok(...)` instead of pattern-matching, which
+  reads worse and skips the value bind.
+- when a struct or enum holds a non-eq-able field/payload
+  (today: only the deliberately-excluded `Map` / `Result` /
+  `Opt`), the C backend still emits the `lingo_eq_<T>` helper
+  (so unrelated code that mentions `T` keeps compiling), but
+  the body is a permanent `return false`.  any actual `==` on
+  such a value is rejected at the **call site** with a
+  localized diagnostic that names the offending field — the
+  error points at the user's `==`, not at the synthesised
+  helper.
+- mixed-kind comparisons (`p == 1` where `p: Point`) stay
+  errors, because the existing primitive arms in `bin_op`
+  catch the type mismatch before the structural path runs.
+  this is why the interp short-circuit only fires when at
+  least one side is a compound *and* both sides are the same
+  compound kind.
