@@ -360,6 +360,7 @@ fn rewrite_into(
         own_names: &module.own_names,
         imports: &module.imports,
         prefix_by_canonical,
+        errors: std::cell::RefCell::new(Vec::new()),
     };
     for item in &module.program.items {
         match item {
@@ -442,6 +443,13 @@ fn rewrite_into(
             }
         }
     }
+    // Surface the first error gathered during the rewrite (e.g. a
+    // dotted type ref whose alias isn't an import in this module).
+    // We stop at the first one so the diagnostic stream stays
+    // focused on the root cause rather than the cascade.
+    if let Some(first) = ctx.errors.into_inner().into_iter().next() {
+        return Err(first);
+    }
     Ok(())
 }
 
@@ -450,6 +458,12 @@ struct RewriteCtx<'a> {
     own_names: &'a HashSet<String>,
     imports: &'a HashMap<String, PathBuf>,
     prefix_by_canonical: &'a HashMap<PathBuf, String>,
+    // Errors gathered during the otherwise-infallible rewrite (e.g. a
+    // dotted type ref whose alias isn't an import).  Threaded through
+    // `RefCell` so the existing rewrite signatures keep returning
+    // plain values; the resolver checks this after the pass and
+    // surfaces the first error.
+    errors: std::cell::RefCell<Vec<LingoError>>,
 }
 
 impl<'a> RewriteCtx<'a> {
@@ -462,7 +476,35 @@ impl<'a> RewriteCtx<'a> {
     /// Add this module's prefix *only if* `name` is one of this module's
     /// own top-level names — used when rewriting a reference that may
     /// or may not point at a local decl.
+    ///
+    /// v0.3.1: `name` may also be a dotted cross-module reference like
+    /// `bar.Point`.  In that case `bar` is looked up in this module's
+    /// imports, the imported module's prefix is fetched, and the
+    /// resolved flat name `lm{i}__Point` is returned.  The interp and
+    /// the C backend never see a dotted name — by the time they run,
+    /// every reference is a regular flat ident.
     fn maybe_prefix_typename(&self, name: &str) -> String {
+        if let Some((alias, last)) = name.split_once('.') {
+            if let Some(target) = self.imports.get(alias) {
+                if let Some(prefix) = self.prefix_by_canonical.get(target) {
+                    return format!("{prefix}{last}");
+                }
+            }
+            // Alias isn't an import in this module — record an error
+            // here so the resolver fails clean instead of leaving a
+            // dotted name to confuse the downstream backends.  Use the
+            // dummy span (0..0) because TypeRef-style call sites don't
+            // thread a span into this helper; the diagnostic body is
+            // unambiguous on its own.
+            self.errors.borrow_mut().push(LingoError::new(
+                Stage::Parse,
+                format!(
+                    "cannot resolve `{name}`: `{alias}` is not an import in this module"
+                ),
+                Span::new(0, 0),
+            ));
+            return name.to_string();
+        }
         if self.own_names.contains(name) {
             self.prefix_name(name)
         } else {

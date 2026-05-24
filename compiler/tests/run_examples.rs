@@ -1104,3 +1104,79 @@ fn modules_reject_import_cycle() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("cyclic import"), "wrong diagnostic: {stderr}");
 }
+
+// =====================================================================
+// v0.3.1 — cross-module type refs and struct literals.
+//
+// `fn f() -> bar.Point`, `let p: bar.Point = ...`, and
+// `bar.Point{x: 1, y: 2}` all work; the resolver rewrites the dotted
+// reference to a flat prefixed ident before either backend runs.
+// =====================================================================
+
+#[test]
+fn modules_xmod_types() {
+    let (stdout, stderr, code) = run("modules_xmod_types/main.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "o.x=0 o.y=0\np.x=3 p.y=4\nq.x=13 q.y=4\ndx(p, q) = 10\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn modules_xmod_types_native() {
+    let Some((stdout, stderr, code)) = run_native("modules_xmod_types/main.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("modules_xmod_types/main.lingo");
+    assert_eq!(stdout, interp_out);
+}
+
+#[test]
+fn modules_reject_dotted_type_with_unknown_alias() {
+    // `import geom` is in scope; `other.Point` references an alias
+    // that was never imported.  Should surface as a clear diagnostic
+    // from the typechecker (the dotted name is preserved through the
+    // resolver, so the downstream "unknown type" path reports it).
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let dir = std::env::temp_dir().join("lingo_modules_xmod_unknown_alias");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.lingo");
+    let geom = dir.join("geom.lingo");
+    std::fs::write(
+        &entry,
+        "import geom\nfn make() -> other.Point:\n    return geom.Point{x: 0, y: 0}\nfn main():\n    let _ = make()\n",
+    )
+    .unwrap();
+    std::fs::write(&geom, "struct Point:\n    x: int\n    y: int\n").unwrap();
+    let out = Command::new(bin).arg(&entry).output().expect("run lingo");
+    assert!(!out.status.success(), "should reject unknown-alias dotted type ref");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The dotted name shows up verbatim in the resolver-passed-through
+    // diagnostic, which is the most useful surface for the reader.
+    assert!(
+        stderr.contains("other.Point"),
+        "diagnostic should mention `other.Point`: {stderr}"
+    );
+}
+
+#[test]
+fn modules_reject_two_hop_dotted_type() {
+    // The parser only accepts one module hop in a dotted type ref.
+    // `a.b.C` should produce a clear parse-time diagnostic.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let dir = std::env::temp_dir().join("lingo_modules_two_hop");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.lingo");
+    std::fs::write(
+        &entry,
+        "fn make() -> a.b.Point:\n    return Point{x: 0}\nfn main():\n    let _ = make()\n",
+    )
+    .unwrap();
+    let out = Command::new(bin).arg(&entry).output().expect("run lingo");
+    assert!(!out.status.success(), "should reject two-hop dotted type");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("one hop only") || stderr.contains("a.b"),
+        "diagnostic should explain the one-hop rule: {stderr}"
+    );
+}

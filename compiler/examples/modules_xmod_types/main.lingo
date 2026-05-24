@@ -1,0 +1,15 @@
+import geom
+
+# Cross-module return type: `geom.Point` as the declared return type.
+fn shifted_x(p: geom.Point, dx: int) -> geom.Point:
+    return geom.Point{x: p.x + dx, y: p.y}
+
+fn main():
+    let o = geom.origin()
+    # Cross-module struct literal at a call site.
+    let p = geom.Point{x: 3, y: 4}
+    let q = shifted_x(p, 10)
+    print(f"o.x={o.x} o.y={o.y}")
+    print(f"p.x={p.x} p.y={p.y}")
+    print(f"q.x={q.x} q.y={q.y}")
+    print(f"dx(p, q) = {geom.dx(p, q)}")
