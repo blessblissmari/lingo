@@ -1217,3 +1217,45 @@ fn eq_struct_mismatched_kinds_errors() {
     let out = Command::new(bin).arg(&entry).output().expect("run lingo");
     assert!(!out.status.success(), "should reject struct == int");
 }
+
+// ---------- v0.3.3: `to_str(v) -> str` builtin (interp display shape) ----------
+
+#[test]
+fn to_str_struct_enum() {
+    let (stdout, stderr, code) = run("to_str_struct_enum.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "Point{x: 1, y: 2}\nShape.Line(3, 4)\nShape.Dot\nShape.Box(Point{x: 1, y: 2})\nvec[1, 2, 3]\nvec[a, b]\n42\n3.5\ntrue\nlabel: Point{x: 1, y: 2}\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn to_str_struct_enum_native() {
+    let Some((stdout, stderr, code)) = run_native("to_str_struct_enum.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("to_str_struct_enum.lingo");
+    assert_eq!(stdout, interp_out, "interp ≡ native byte-identical");
+}
+
+#[test]
+fn to_str_rejects_map_value() {
+    // `to_str(map)` is rejected today on the native backend; match the
+    // value out first.  Interpreter formats the map (display impl exists),
+    // so this is a backend-only diagnostic — we only check the C error
+    // path here.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let dir = std::env::temp_dir().join("lingo_to_str_map");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.lingo");
+    std::fs::write(
+        &entry,
+        "fn main():\n    let m: map[str, int] = {\"a\": 1}\n    print(to_str(m))\n",
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .arg("emit-c")
+        .arg(&entry)
+        .output()
+        .expect("run lingo emit-c");
+    assert!(!out.status.success(), "should reject to_str(map) on C backend");
+}

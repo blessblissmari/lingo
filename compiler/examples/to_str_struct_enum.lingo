@@ -1,0 +1,34 @@
+# v0.3.3: `to_str(value) -> str` builtin — returns a string in the same
+# shape as the interpreter's `Value::display` (matches the `print` shape
+# for a single value, sans trailing newline).  Single-arg, positional.
+# Builtin is intercepted by name, so user code can still define methods
+# or free functions called `to_str` for other shapes if needed (the
+# builtin wins for the exact `to_str(arg)` shape).
+#
+# Works on: int, float, bool, str, struct, enum, and `vec[T]` for any
+# showable T.  Not supported yet: map / Result[T,E] / Opt[T] (match on
+# them first, then format what's inside).
+
+struct Point:
+    x: int
+    y: int
+
+enum Shape:
+    Dot
+    Line(int, int)
+    Box(Point)
+
+fn main():
+    let p = Point{x: 1, y: 2}
+    let s = to_str(p)
+    print(s)
+    print(to_str(Shape.Line(3, 4)))
+    print(to_str(Shape.Dot))
+    print(to_str(Shape.Box(p)))
+    print(to_str(vec[1, 2, 3]))
+    print(to_str(vec["a", "b"]))
+    print(to_str(42))
+    print(to_str(3.5))
+    print(to_str(true))
+    # composition: build a labelled string from pieces
+    print("label: " + to_str(p))

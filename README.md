@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.3.2 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  **Modules (v0.3.0):** `import foo` reads `foo.lingo`; `import foo.bar` reads `foo/bar.lingo`; `import foo as f` renames the alias.  The alias is the only way to reach another module's top-level names — `f.fn()`, `f.CONST`, `f.MyEnum.Variant`.  Cycle / duplicate-alias / missing-target diagnostics are mandatory.  **Cross-module types (v0.3.1):** `fn f() -> bar.Point`, `let p: bar.Point = ...`, `vec[bar.Point]`, and `bar.Point{x: 1, y: 2}` all work — the resolver rewrites every dotted reference to a flat ident before the interp / C backend runs, so both backends keep working on one flat program.  Parser limit: one module hop (`a.b.C` rejected).  Unknown alias is a clean resolver-time error.  **Structural eq (v0.3.2):** `==` and `!=` now work field-wise on structs, tag+payload-wise on enums, and element-wise on `vec[T]`, recursing through nested compound types.  `Map`/`Result`/`Opt` deliberately stay non-`==`-able — error at the call site, not at the helper.  83/83 integration tests green; **38/40 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  No re-exports, no `import *`, no privacy.
+> ⚠️ **status:** v0.3.3 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  **Modules (v0.3.0):** `import foo` reads `foo.lingo`; `import foo.bar` reads `foo/bar.lingo`; `import foo as f` renames the alias.  The alias is the only way to reach another module's top-level names — `f.fn()`, `f.CONST`, `f.MyEnum.Variant`.  Cycle / duplicate-alias / missing-target diagnostics are mandatory.  **Cross-module types (v0.3.1):** `fn f() -> bar.Point`, `let p: bar.Point = ...`, `vec[bar.Point]`, and `bar.Point{x: 1, y: 2}` all work — the resolver rewrites every dotted reference to a flat ident before the interp / C backend runs, so both backends keep working on one flat program.  Parser limit: one module hop (`a.b.C` rejected).  Unknown alias is a clean resolver-time error.  **Structural eq (v0.3.2):** `==` and `!=` now work field-wise on structs, tag+payload-wise on enums, and element-wise on `vec[T]`, recursing through nested compound types.  `Map`/`Result`/`Opt` deliberately stay non-`==`-able — error at the call site, not at the helper.  **`to_str(v) -> str` (v0.3.3):** builtin stringifier in the same display shape as `print`; intercepted by name (not a keyword), so user `to_str` methods on traits keep working.  86/86 integration tests green; **39/41 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  No re-exports, no `import *`, no privacy.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -189,6 +189,11 @@ own directory; the resolver follows `import` lines to sibling
 **structural equality (v0.3.2)** — `==` / `!=` work on user types:
 field-wise on structs, tag+payload-wise on enums, element-wise on
 `vec[T]`.  [`eq_struct_enum`](compiler/examples/eq_struct_enum.lingo)
+
+**`to_str(v) -> str` builtin (v0.3.3)** — same display shape as `print`
+for a single value, but returns the string instead of writing it.
+Works on int / float / bool / str / struct / enum / `vec[T]`.
+[`to_str_struct_enum`](compiler/examples/to_str_struct_enum.lingo)
 
 native-capable:
 [`hello`](compiler/examples/hello.lingo) ·
