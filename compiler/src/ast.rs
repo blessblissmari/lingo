@@ -256,6 +256,7 @@ pub enum ExprKind {
     Ident(String),
     Self_,
     PrintBuiltin,
+    ShowBuiltin,
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(Box<Expr>, Vec<Arg>),

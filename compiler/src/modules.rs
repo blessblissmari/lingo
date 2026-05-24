@@ -728,6 +728,7 @@ impl<'a> RewriteCtx<'a> {
             | ExprKind::None_
             | ExprKind::Self_
             | ExprKind::PrintBuiltin
+            | ExprKind::ShowBuiltin
             | ExprKind::Forever) => {
                 let _ = span;
                 other

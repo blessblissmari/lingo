@@ -171,6 +171,35 @@ programs aren't forced to live in one `.lingo` file.
   **38/40** byte-identical interp ≡ native.  clippy 0 warnings.
   no AST / parser / resolver changes.
 
+- [x] **`to_str(v) -> str` builtin (v0.3.3)**:
+  closes the second half of the v0.3.2 structural-helpers gap.
+  before v0.3.3, the only way to get a printable string out of
+  a struct/enum/vec was to write a custom formatter or splice
+  the value into an f-string (which only worked because the
+  interp already had `Value::display`).  v0.3.3 surfaces that
+  same display shape as a one-call builtin: `let s = to_str(p)`
+  returns `"Point{x: 1, y: 2}"` for an interp value and a
+  byte-identical heap string from the C backend.  intercepted
+  **by name** at the call dispatch site — mirrors how `int(x)`
+  and `float(x)` casts are handled — so `to_str` is not a
+  keyword and `trait Show: fn show(self) -> str` style traits
+  keep working.  single positional argument; multi-arg was
+  considered and dropped in favour of `"label: " + to_str(p)`.
+  works on int / float / bool / str / struct / enum / `vec[T]`;
+  rejects `map`, `Result[T,E]`, `Opt[T]` at compile time
+  (match on them first).  C backend: pass 1c gains a per-struct
+  / per-enum `lingo_show_<T>` helper (alongside `lingo_eq_<T>`),
+  and `gen_program` flushes a `lingo_show_vec_<T>` helper per
+  distinct element type seen.  runtime helpers
+  (`lingo_show_i64/u64/f64/bool/str`, `lingo_strjoin` variadic
+  concat) are spliced unconditionally with `__attribute__
+  ((unused))`.  new example `to_str_struct_enum.lingo`, 3 new
+  tests (positive interp, interp ≡ native byte-identical,
+  negative compile-error pin for `to_str(map)`).  **86/86 green**
+  (was 83/83).  audit **39/41** byte-identical (the +1 is the
+  new example, the failures are the same two preexisting non-
+  matchers — neither involves `to_str`).  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers

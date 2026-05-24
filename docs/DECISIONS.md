@@ -569,3 +569,44 @@ impl Bag[int] for IntBag:
   this is why the interp short-circuit only fires when at
   least one side is a compound *and* both sides are the same
   compound kind.
+
+### v0.3.3 — `to_str(v) -> str` builtin (display-shape stringifier)
+
+- `to_str(v)` returns a heap-allocated `str` in the same shape
+  the interpreter prints with `print(v)` for a single value —
+  i.e. `Value::display` for the interp, byte-identical from the
+  C backend.  Single argument, positional only.
+- intercepted **by name** at the call dispatch site, *not* a
+  keyword.  user code can still define `fn to_str(self) -> str`
+  on a struct (or a free `fn to_str(...)`) — the builtin wins
+  only for the exact call shape `to_str(arg)`.  this matches
+  how `int(x)` / `float(x)` cast-builtins are intercepted.
+  the alternative — making `to_str` a reserved word — would
+  break the `Show` trait pattern in `examples/traits.lingo`,
+  which is the obvious place for user-defined display methods
+  once traits land.
+- works on int, float, bool, str, struct, enum, and `vec[T]`
+  for any showable `T`.  rejected today: `map`, `Result[T,E]`,
+  `Opt[T]` — these need a `match` to discriminate first, and
+  silently picking a shape for them would invite "is this Ok?"
+  questions written as `to_str(r) == "Ok(...)"` instead of
+  pattern-matching.
+- **why a builtin and not `derive Show`:** lingo has no trait
+  machinery you can actually `derive` against yet — the `Show`
+  trait in `examples/traits.lingo` is a hand-written fixture,
+  not a real abstraction.  shipping `derive` first would force
+  every codegen path through a synthesized `impl`, and we'd
+  have to redo it once traits become first-class.  a builtin
+  gets users the same ergonomic win (`print("p = " + to_str(p))`
+  instead of writing a custom formatter for every struct) with
+  zero new surface area in the language.  `derive Show/Eq` can
+  arrive later as a sugar over the same display rules.
+- multi-arg form (`to_str("label:", p)` joining with " ") was
+  considered and dropped.  if you want a labelled value, the
+  cleaner spelling is `"label: " + to_str(p)` or
+  `f"label: {to_str(p)}"` — both already work, both keep the
+  call shape stable at one argument.
+- `==` (v0.3.2) and `to_str` (v0.3.3) together close the
+  "structural-helpers-for-data-types" gap: any v0.3.x program
+  can compare two values for equality and turn either of them
+  into a printable string without writing a single helper.

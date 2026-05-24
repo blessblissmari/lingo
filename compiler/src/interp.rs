@@ -1073,6 +1073,11 @@ impl Interp {
                 "`print` can only be called, not used as a value",
                 e.span,
             )),
+            ExprKind::ShowBuiltin => Err(LingoError::new(
+                Stage::Runtime,
+                "internal: ShowBuiltin AST node is reserved — `to_str` is intercepted by name in eval_call",
+                e.span,
+            )),
             ExprKind::StructLit { name, fields } => {
                 let decl = self.structs.get(name).cloned().ok_or_else(|| {
                     LingoError::new(
@@ -1365,6 +1370,19 @@ impl Interp {
             }
             println!("{out}");
             return Ok(Value::None_);
+        }
+
+        // v0.3.3: builtin `to_str(v) -> str` — returns a string in the same
+        // shape as the interpreter's `Value::display` (matching `print` for
+        // a single arg, sans trailing newline).  Intercepted by name at the
+        // call dispatch site (not a keyword) so user code can still define
+        // `fn to_str(...)` methods/free fns — though the builtin will win
+        // whenever the call shape is exactly `to_str(arg)`.
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "to_str" && args.len() == 1 && args[0].name.is_none() {
+                let v = self.eval(&args[0].value)?;
+                return Ok(Value::Str(v.display()));
+            }
         }
 
         // Type.Variant(args) — enum variant construction

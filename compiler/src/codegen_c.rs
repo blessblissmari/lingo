@@ -342,6 +342,14 @@ pub struct Codegen {
     /// `BinOp::Eq`/`Ne` at the call site so the error points at the user's
     /// `==`, not the synthesised helper.
     struct_eq_unsupported: HashMap<String, String>,
+    /// v0.3.3: did we see any `show(...)` call?  Set true when
+    /// `show_call_for_ty` runs; gates whether the splice in `emit()`
+    /// pulls in the show runtime helpers.
+    uses_show_runtime: bool,
+    /// v0.3.3: distinct `vec[T]` element-type suffixes we need a
+    /// `lingo_show_vec_<T>` helper for.  Filled by `show_call_for_ty`,
+    /// flushed at the end of `gen_program` into `self.body`.
+    show_vec_types: std::collections::BTreeSet<String>,
     /// Stack of local-scope variable types. Top frame is the active scope.
     scopes: Vec<HashMap<String, CType>>,
     /// How deep are we indented in the current C function body?
@@ -393,6 +401,8 @@ impl Codegen {
             structs: HashMap::new(),
             enums: HashMap::new(),
             struct_eq_unsupported: HashMap::new(),
+            uses_show_runtime: false,
+            show_vec_types: std::collections::BTreeSet::new(),
             scopes: Vec::new(),
             indent: 0,
             tmp_counter: 0,
@@ -713,20 +723,24 @@ impl Codegen {
         // missing helper and errors at codegen.
         // Forward decls first.
         for s in items.iter().filter_map(|it| if let Item::Struct(s) = it { Some(s) } else { None }) {
-            writeln!(self.type_defs, "static bool lingo_eq_{n}({n} a, {n} b);", n = s.name).unwrap();
+            writeln!(self.type_defs, "__attribute__((unused)) static bool lingo_eq_{n}({n} a, {n} b);", n = s.name).unwrap();
+            writeln!(self.type_defs, "__attribute__((unused)) static const char* lingo_show_{n}({n} v);", n = s.name).unwrap();
         }
         for e in &enum_decls {
-            writeln!(self.type_defs, "static bool lingo_eq_{n}({n} a, {n} b);", n = e.name).unwrap();
+            writeln!(self.type_defs, "__attribute__((unused)) static bool lingo_eq_{n}({n} a, {n} b);", n = e.name).unwrap();
+            writeln!(self.type_defs, "__attribute__((unused)) static const char* lingo_show_{n}({n} v);", n = e.name).unwrap();
         }
         writeln!(self.type_defs).unwrap();
         // Bodies.
         for item in items {
             if let Item::Struct(s) = item {
                 self.emit_struct_eq_helper(s)?;
+                self.emit_struct_show_helper(s)?;
             }
         }
         for e in &enum_decls {
             self.emit_enum_eq_helper(e)?;
+            self.emit_enum_show_helper(e)?;
         }
 
         // Pass 2: collect function signatures (free + impl methods).
@@ -861,6 +875,55 @@ impl Codegen {
         // monomorphized result typedefs that aren't part of the static
         // prelude.
         out.push_str("/* === lingo runtime helpers === */\n");
+        // v0.3.3: emit per-element `lingo_show_vec_<T>` helpers right after
+        // the runtime block marker.  Helpers go into `out` directly (not
+        // `self.body`) because they must come *after* `lingo_strjoin` /
+        // `lingo_show_<T>` (spliced by `emit()`) and *before* user fn
+        // bodies which call them.
+        // We're already past pass-2 fn signatures at this point, so
+        // forward-decl + body live together.
+        let show_vec_types = std::mem::take(&mut self.show_vec_types);
+        for suffix in show_vec_types {
+            // The element show call: primitives via runtime, structs/enums
+            // via the per-type helper, nested vec via the per-vec helper
+            // (already registered).  We dispatch on suffix string.
+            let elem_show_call = match suffix.as_str() {
+                "i64" => "lingo_show_i64(v.data[i])".to_string(),
+                "u64" => "lingo_show_u64(v.data[i])".to_string(),
+                "f64" => "lingo_show_f64(v.data[i])".to_string(),
+                "bool" => "lingo_show_bool(v.data[i])".to_string(),
+                "str" => "lingo_show_str(v.data[i])".to_string(),
+                other => format!("lingo_show_{}(v.data[i])", other),
+            };
+            writeln!(
+                out,
+                "__attribute__((unused)) static const char* lingo_show_vec_{sfx}(lingo_vec_{sfx}_t v) {{",
+                sfx = suffix,
+            ).unwrap();
+            writeln!(out, "    if (v.len == 0) return \"vec[]\";").unwrap();
+            writeln!(out, "    /* count = 1 prefix + (2 per elem: sep + show) + 1 suffix */").unwrap();
+            writeln!(out, "    int count = 1 + 2 * (int)v.len + 1;").unwrap();
+            writeln!(out, "    const char** parts = (const char**)malloc((size_t)count * sizeof(const char*));").unwrap();
+            writeln!(out, "    if (!parts) {{ fprintf(stderr, \"lingo: oom in show_vec\\n\"); exit(1); }}").unwrap();
+            writeln!(out, "    int k = 0;").unwrap();
+            writeln!(out, "    parts[k++] = \"vec[\";").unwrap();
+            writeln!(out, "    for (int64_t i = 0; i < v.len; i++) {{").unwrap();
+            writeln!(out, "        if (i > 0) parts[k++] = \", \"; else parts[k++] = \"\";").unwrap();
+            writeln!(out, "        parts[k++] = {};", elem_show_call).unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "    parts[k++] = \"]\";").unwrap();
+            writeln!(out, "    /* compute total length */").unwrap();
+            writeln!(out, "    size_t total = 0;").unwrap();
+            writeln!(out, "    for (int j = 0; j < k; j++) total += strlen(parts[j]);").unwrap();
+            writeln!(out, "    char* outbuf = (char*)malloc(total + 1);").unwrap();
+            writeln!(out, "    if (!outbuf) {{ fprintf(stderr, \"lingo: oom in show_vec\\n\"); exit(1); }}").unwrap();
+            writeln!(out, "    char* p = outbuf;").unwrap();
+            writeln!(out, "    for (int j = 0; j < k; j++) {{ size_t L = strlen(parts[j]); memcpy(p, parts[j], L); p += L; }}").unwrap();
+            writeln!(out, "    *p = '\\0';").unwrap();
+            writeln!(out, "    free(parts);").unwrap();
+            writeln!(out, "    return outbuf;").unwrap();
+            writeln!(out, "}}\n").unwrap();
+        }
         out.push_str(&self.protos);
         out.push('\n');
         out.push_str(&self.body);
@@ -985,6 +1048,164 @@ impl Codegen {
             writeln!(self.body, "    }}").unwrap();
             writeln!(self.body, "    return false;").unwrap();
         }
+        writeln!(self.body, "}}\n").unwrap();
+        Ok(())
+    }
+
+    /// v0.3.3: produce a C expression returning `const char*` for value
+    /// `code` of CType `ty`, in the same shape as the interpreter's
+    /// `Value::display`.  Routes primitives through `lingo_show_<T>`
+    /// runtime helpers, structs/enums through their per-type
+    /// `lingo_show_<T>` synthesised helper, and vecs through a per-element
+    /// `lingo_show_vec_<T>` helper registered in `self.show_vec_types`.
+    fn show_call_for_ty(&mut self, ty: &CType, code: &str, span: Span) -> Result<String, LingoError> {
+        self.uses_show_runtime = true;
+        match ty {
+            CType::Str => Ok(format!("lingo_show_str({})", code)),
+            CType::I64 => Ok(format!("lingo_show_i64({})", code)),
+            CType::U64 => Ok(format!("lingo_show_u64({})", code)),
+            CType::F64 => Ok(format!("lingo_show_f64({})", code)),
+            CType::Bool => Ok(format!("lingo_show_bool({})", code)),
+            CType::Struct(n) | CType::Enum(n) => Ok(format!("lingo_show_{}({})", n, code)),
+            CType::Vec(inner) => {
+                // Validate the element is itself showable before registering.
+                let _probe = self.show_call_for_ty(inner, "__probe", span)?;
+                self.show_vec_types.insert(inner.mono_suffix());
+                Ok(format!("lingo_show_vec_{}({})", inner.mono_suffix(), code))
+            }
+            CType::Map(_, _) => Err(LingoError::new(
+                Stage::Resolve,
+                "C backend: `show` on `map` is not supported yet",
+                span,
+            )),
+            CType::Result(_, _) => Err(LingoError::new(
+                Stage::Resolve,
+                "C backend: `show` on `T!E` is not supported yet — `match` on it first",
+                span,
+            )),
+            CType::Opt(_) => Err(LingoError::new(
+                Stage::Resolve,
+                "C backend: `show` on `Opt[T]` is not supported yet — `match` on it first",
+                span,
+            )),
+            CType::Void => Err(LingoError::new(
+                Stage::Resolve,
+                "C backend: `show` on `void` is meaningless",
+                span,
+            )),
+        }
+    }
+
+    /// v0.3.3: emit
+    /// `static const char* lingo_show_<S>(<S> v) { return lingo_strjoin("", N, "<S>{f1: ", show(v.f1), ", f2: ", show(v.f2), "}"); }`.
+    /// If any field has an unshowable type today (`Map`/`Result`/`Opt`),
+    /// emit a placeholder body that returns `"<S>{...}"` — keeps the
+    /// helper compilable so unrelated code keeps building, and at least
+    /// the type name is preserved in the output.
+    fn emit_struct_show_helper(&mut self, s: &StructDecl) -> Result<(), LingoError> {
+        let fields = self.structs[&s.name].clone();
+        writeln!(self.body, "static const char* lingo_show_{n}({n} v) {{", n = s.name).unwrap();
+        if fields.is_empty() {
+            writeln!(self.body, "    (void)v; return \"{}{{}}\";", s.name).unwrap();
+            writeln!(self.body, "}}\n").unwrap();
+            return Ok(());
+        }
+        // Try to produce a show call per field.  If any fails, switch to
+        // the opaque "<Name>{...}" placeholder body.
+        let mut field_calls: Vec<(String, String)> = Vec::with_capacity(fields.len());
+        let mut fallback = false;
+        for (fname, fty) in &fields {
+            let code = format!("v.{}", fname);
+            match self.show_call_for_ty(fty, &code, s.span) {
+                Ok(call) => field_calls.push((fname.clone(), call)),
+                Err(_) => { fallback = true; break; }
+            }
+        }
+        if fallback {
+            writeln!(self.body, "    (void)v; return \"{}{{...}}\";", s.name).unwrap();
+            writeln!(self.body, "}}\n").unwrap();
+            return Ok(());
+        }
+        // pieces alternate literal/call; lingo_strjoin takes (sep, n, parts...).
+        let mut pieces: Vec<String> = Vec::new();
+        for (i, (fname, call)) in field_calls.iter().enumerate() {
+            let prefix = if i == 0 {
+                format!("\"{}{{{}: \"", s.name, fname)
+            } else {
+                format!("\", {}: \"", fname)
+            };
+            pieces.push(prefix);
+            pieces.push(call.clone());
+        }
+        pieces.push("\"}\"".to_string());
+        self.uses_show_runtime = true;
+        writeln!(
+            self.body,
+            "    return lingo_strjoin(\"\", {}, {});",
+            pieces.len(),
+            pieces.join(", "),
+        ).unwrap();
+        writeln!(self.body, "}}\n").unwrap();
+        Ok(())
+    }
+
+    /// v0.3.3: enum show helper — `Name.Variant` for unit variants,
+    /// `Name.Variant(<show p0>, <show p1>, ...)` for payload-carrying ones.
+    fn emit_enum_show_helper(&mut self, e: &EnumDecl) -> Result<(), LingoError> {
+        writeln!(self.body, "static const char* lingo_show_{n}({n} v) {{", n = e.name).unwrap();
+        writeln!(self.body, "    switch (v.tag) {{").unwrap();
+        for variant in &e.variants {
+            if variant.payload.is_empty() {
+                writeln!(
+                    self.body,
+                    "    case {n}_{vn}_TAG: return \"{n}.{vn}\";",
+                    n = e.name, vn = variant.name,
+                ).unwrap();
+                continue;
+            }
+            let mut calls: Vec<String> = Vec::new();
+            let mut fallback = false;
+            for (i, p) in variant.payload.iter().enumerate() {
+                let pty = match map_type_with(p, variant.span, Some(&self.structs), Some(&self.enums)) {
+                    Ok(t) => t,
+                    Err(_) => { fallback = true; break; }
+                };
+                let code = format!("v.as.{}._{}", variant.name, i);
+                match self.show_call_for_ty(&pty, &code, variant.span) {
+                    Ok(c) => calls.push(c),
+                    Err(_) => { fallback = true; break; }
+                }
+            }
+            if fallback {
+                writeln!(
+                    self.body,
+                    "    case {n}_{vn}_TAG: return \"{n}.{vn}(...)\";",
+                    n = e.name, vn = variant.name,
+                ).unwrap();
+                continue;
+            }
+            let mut pieces: Vec<String> = Vec::new();
+            for (i, c) in calls.iter().enumerate() {
+                let prefix = if i == 0 {
+                    format!("\"{}.{}(\"", e.name, variant.name)
+                } else {
+                    "\", \"".to_string()
+                };
+                pieces.push(prefix);
+                pieces.push(c.clone());
+            }
+            pieces.push("\")\"".to_string());
+            self.uses_show_runtime = true;
+            writeln!(
+                self.body,
+                "    case {n}_{vn}_TAG: return lingo_strjoin(\"\", {}, {});",
+                pieces.len(),
+                pieces.join(", "),
+                n = e.name, vn = variant.name,
+            ).unwrap();
+        }
+        writeln!(self.body, "    }}").unwrap();
+        writeln!(self.body, "    return \"{}.?\";", e.name).unwrap();
         writeln!(self.body, "}}\n").unwrap();
         Ok(())
     }
@@ -3434,6 +3655,19 @@ impl Codegen {
     }
 
     fn gen_call(&mut self, callee: &Expr, args: &[Arg], span: Span) -> Result<(String, CType), LingoError> {
+        // v0.3.3: builtin `to_str(v) -> str` — returns a heap-allocated C
+        // string matching the interpreter's `Value::display` shape.
+        // Intercepted by name (not a keyword) so user code can still use
+        // `to_str` as a method/free fn name; the builtin wins when the call
+        // shape is exactly `to_str(arg)` (single positional arg).
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "to_str" && args.len() == 1 && args[0].name.is_none() {
+                let arg = &args[0];
+                let (code, ty) = self.gen_expr(&arg.value)?;
+                let call = self.show_call_for_ty(&ty, &code, arg.value.span)?;
+                return Ok((call, CType::Str));
+            }
+        }
         // v0.2.0: builtin `int(x)` — handled before generic call dispatch.
         //   - `int(s: str) -> int ! str`    parse base-10, error is a static C string
         //   - `int(n: int) -> int`          identity
@@ -4223,6 +4457,99 @@ static void lingo_vec_str_set(lingo_vec_str_t* v, int64_t i, const char* x) {
         exit(1);
     }
     v->data[i] = x;
+}
+
+/* === show runtime (v0.3.3) ===
+ * `show(v)` builds a heap-allocated `const char*` matching the
+ * interpreter's `Value::display` for the same value.  Leaky like the rest
+ * of the bootstrap str runtime — once we have an allocator + `defer`,
+ * these go through it.
+ */
+__attribute__((unused))
+static const char* lingo_show_i64(int64_t n) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), \"%\" PRId64, n);
+    size_t L = strlen(buf);
+    char* out = (char*)malloc(L + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in show_i64\\n\"); exit(1); }
+    memcpy(out, buf, L + 1);
+    return out;
+}
+__attribute__((unused))
+static const char* lingo_show_u64(uint64_t n) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), \"%\" PRIu64, n);
+    size_t L = strlen(buf);
+    char* out = (char*)malloc(L + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in show_u64\\n\"); exit(1); }
+    memcpy(out, buf, L + 1);
+    return out;
+}
+__attribute__((unused))
+static const char* lingo_show_f64(double f) {
+    /* Mirror interp's format_float: integer-valued finite floats print as
+     * `5.0`; otherwise the shortest-round-trip helper handles them. */
+    if (isfinite(f) && f == (double)(int64_t)f) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), \"%.1f\", f);
+        size_t L = strlen(buf);
+        char* out = (char*)malloc(L + 1);
+        if (!out) { fprintf(stderr, \"lingo: oom in show_f64\\n\"); exit(1); }
+        memcpy(out, buf, L + 1);
+        return out;
+    }
+    return lingo_f64_str(f);
+}
+__attribute__((unused))
+static const char* lingo_show_bool(bool b) {
+    return b ? \"true\" : \"false\";
+}
+__attribute__((unused))
+static const char* lingo_show_str(const char* s) {
+    /* Mirror interp display: unquoted.  Quoting belongs to a future
+     * `debug_show` (Rust's `{:?}`).  See docs/DECISIONS.md. */
+    return s == NULL ? \"\" : s;
+}
+
+/* Variadic concat helper: lingo_strjoin(sep, count, p1, p2, ..., pN).
+ * Each `pi` is a `const char*`.  Output is malloc'd, NUL-terminated. */
+__attribute__((unused))
+static const char* lingo_strjoin(const char* sep, int count, ...) {
+    if (count <= 0) {
+        char* empty = (char*)malloc(1);
+        if (!empty) { fprintf(stderr, \"lingo: oom in strjoin\\n\"); exit(1); }
+        empty[0] = '\\0';
+        return empty;
+    }
+    size_t sep_len = sep ? strlen(sep) : 0;
+    /* First pass: collect pointers + total length. */
+    const char** parts = (const char**)malloc((size_t)count * sizeof(const char*));
+    if (!parts) { fprintf(stderr, \"lingo: oom in strjoin\\n\"); exit(1); }
+    va_list ap;
+    va_start(ap, count);
+    size_t total = 0;
+    for (int i = 0; i < count; i++) {
+        const char* s = va_arg(ap, const char*);
+        parts[i] = s ? s : \"\";
+        total += strlen(parts[i]);
+        if (i + 1 < count) total += sep_len;
+    }
+    va_end(ap);
+    char* out = (char*)malloc(total + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in strjoin\\n\"); exit(1); }
+    char* p = out;
+    for (int i = 0; i < count; i++) {
+        size_t L = strlen(parts[i]);
+        memcpy(p, parts[i], L);
+        p += L;
+        if (i + 1 < count && sep_len) {
+            memcpy(p, sep, sep_len);
+            p += sep_len;
+        }
+    }
+    *p = '\\0';
+    free(parts);
+    return out;
 }
 
 ";
