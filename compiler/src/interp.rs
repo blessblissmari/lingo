@@ -1939,6 +1939,30 @@ impl Interp {
 fn bin_op(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, LingoError> {
     use BinOp::*;
     use Value::*;
+    // v0.3.2: structural `==` / `!=` on structs, enums (already worked in
+    // `match` via `values_eq`, now exposed via the operator too) and vecs.
+    // We dispatch before the primitive arms because `values_eq` already
+    // handles the primitive cases — but the primitive arms below give
+    // sharper type errors (e.g. `int == bool` still errors with the
+    // standard `cannot apply Eq ...` message rather than `false`), so we
+    // *only* short-circuit when at least one side is a compound type.
+    if matches!(op, Eq | Ne) {
+        let is_compound = |v: &Value| matches!(v, Struct { .. } | Enum { .. } | Vec_(_));
+        if is_compound(&l) || is_compound(&r) {
+            // Reject mixing a compound with a non-matching kind — same
+            // spirit as `int == bool` erroring.  `values_eq` would return
+            // `false`, but a type error is more informative.
+            let same_kind = matches!(
+                (&l, &r),
+                (Struct { .. }, Struct { .. }) | (Enum { .. }, Enum { .. }) | (Vec_(_), Vec_(_))
+            );
+            if !same_kind {
+                return type_err(op, &l, &r, span);
+            }
+            let eq = values_eq(&l, &r);
+            return Ok(Bool(if op == Eq { eq } else { !eq }));
+        }
+    }
     let promote = matches!(&l, Float(_)) || matches!(&r, Float(_));
     if promote {
         let lf = match &l {
@@ -2016,6 +2040,24 @@ fn values_eq(a: &Value, b: &Value) -> bool {
          Value::Enum { type_name: tb, variant: vb, payload: pb }) => {
             ta == tb && va == vb && pa.len() == pb.len()
                 && pa.iter().zip(pb.iter()).all(|(x, y)| values_eq(x, y))
+        }
+        // v0.3.2: structural equality on structs.  Field names must match
+        // (declared in the same struct => same order, but we still compare
+        // by name to be defensive against future rewriters).  Recurses
+        // through nested structs/enums via this same fn.
+        (Value::Struct { type_name: ta, fields: fa },
+         Value::Struct { type_name: tb, fields: fb }) => {
+            ta == tb && fa.len() == fb.len()
+                && fa.iter().zip(fb.iter()).all(|((na, va), (nb, vb))| na == nb && values_eq(va, vb))
+        }
+        // v0.3.2: structural equality on vec values, element-wise.
+        // Map_ intentionally not added — order-sensitive equality on an
+        // associative container is the wrong default; do it explicitly
+        // when there's a real use case.
+        (Value::Vec_(ra), Value::Vec_(rb)) => {
+            let ba = ra.borrow();
+            let bb = rb.borrow();
+            ba.len() == bb.len() && ba.iter().zip(bb.iter()).all(|(x, y)| values_eq(x, y))
         }
         _ => false,
     }

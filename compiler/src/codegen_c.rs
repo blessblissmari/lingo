@@ -335,6 +335,13 @@ pub struct Codegen {
     structs: HashMap<String, Vec<(String, CType)>>,
     /// `enum_name -> EnumDecl`, kept around for variant lookup.
     enums: HashMap<String, EnumDecl>,
+    /// v0.3.2: per-type reason string if the struct/enum can't be compared
+    /// with `==` because at least one field/payload is of a type we don't
+    /// have structural equality for (Map, Result, Opt, …).  Populated by
+    /// `emit_struct_eq_helper` / `emit_enum_eq_helper`; checked by
+    /// `BinOp::Eq`/`Ne` at the call site so the error points at the user's
+    /// `==`, not the synthesised helper.
+    struct_eq_unsupported: HashMap<String, String>,
     /// Stack of local-scope variable types. Top frame is the active scope.
     scopes: Vec<HashMap<String, CType>>,
     /// How deep are we indented in the current C function body?
@@ -385,6 +392,7 @@ impl Codegen {
             fn_param_names: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
+            struct_eq_unsupported: HashMap::new(),
             scopes: Vec::new(),
             indent: 0,
             tmp_counter: 0,
@@ -689,6 +697,38 @@ impl Codegen {
             emit_user_vec_runtime(&mut self.type_defs, &e.name);
         }
 
+        // v0.3.2: per-struct and per-enum equality helpers.  Emitted right
+        // after all type decls so they can call each other (forward decls
+        // emitted first to handle cycles like a struct holding a struct
+        // of itself in a vec, or mutual recursion through enum payloads).
+        //
+        // Shape: `static bool lingo_eq_<T>(<T> a, <T> b)`.  Struct: field-
+        // wise &&-chain. Enum: tag check then per-variant payload check via
+        // the same helper recursively.  Field types restricted to those
+        // supported by structural eq today — primitives, str, struct,
+        // enum, and `vec[<eq-able>]`.  Anything else (`Map`, `Result`,
+        // `Opt`, raw `Vec<unsupported>`) makes the helper emit a
+        // compile-time `#error`, which never fires unless the user
+        // actually calls `==` on that type — the call site detects the
+        // missing helper and errors at codegen.
+        // Forward decls first.
+        for s in items.iter().filter_map(|it| if let Item::Struct(s) = it { Some(s) } else { None }) {
+            writeln!(self.type_defs, "static bool lingo_eq_{n}({n} a, {n} b);", n = s.name).unwrap();
+        }
+        for e in &enum_decls {
+            writeln!(self.type_defs, "static bool lingo_eq_{n}({n} a, {n} b);", n = e.name).unwrap();
+        }
+        writeln!(self.type_defs).unwrap();
+        // Bodies.
+        for item in items {
+            if let Item::Struct(s) = item {
+                self.emit_struct_eq_helper(s)?;
+            }
+        }
+        for e in &enum_decls {
+            self.emit_enum_eq_helper(e)?;
+        }
+
         // Pass 2: collect function signatures (free + impl methods).
         for item in items {
             match item {
@@ -825,6 +865,128 @@ impl Codegen {
         out.push('\n');
         out.push_str(&self.body);
         Ok(out)
+    }
+
+    /// v0.3.2: produce a C expression that tests two values of CType `ty`
+    /// for structural equality.  Used inside the `lingo_eq_<T>` helpers
+    /// and also from `BinOp::Eq`/`Ne` at top-level use sites.
+    /// Returns `Err` if `ty` is not eq-able (Map, Result, Opt, or a Vec
+    /// of an unsupported element).  Callers should turn that into a
+    /// localized "cannot compare values of type X" error.
+    fn field_eq_expr(&self, ty: &CType, a: &str, b: &str) -> Result<String, String> {
+        Ok(match ty {
+            CType::I64 | CType::U64 | CType::F64 | CType::Bool => format!("({} == {})", a, b),
+            CType::Str => format!("(strcmp({}, {}) == 0)", a, b),
+            CType::Struct(n) | CType::Enum(n) => format!("lingo_eq_{}({}, {})", n, a, b),
+            CType::Vec(inner) => {
+                // Element-wise: same length and same elements in order.
+                // The vec value is a struct-by-value: `{ T* data; int64_t len; int64_t cap; }`.
+                // We emit a statement-expression so we keep producing an
+                // expression usable from inside `&&` chains.
+                // The inner element type must itself be eq-able.
+                let _ = self.field_eq_expr(inner, "_x", "_y")?;  // validate eq-able
+                // Use a per-vec helper so the C output is readable and we
+                // don't blow up nested ` && ` chains.  We can't easily emit
+                // anonymous helpers from inside an expression, so inline a
+                // call to a per-element-type helper that's emitted once.
+                // For v0.3.2 we keep this simple: inline a GCC statement
+                // expression (already used elsewhere — see emit_match).
+                let cmp = self.field_eq_expr(inner, "(__a.data[__i])", "(__b.data[__i])")?;
+                format!(
+                    "({{ {vt} __a = {a}; {vt} __b = {b}; bool __eq = (__a.len == __b.len); \
+                     for (int64_t __i = 0; __eq && __i < __a.len; ++__i) {{ __eq = ({cmp}); }} __eq; }})",
+                    vt = ty.c_decl(), a = a, b = b, cmp = cmp,
+                )
+            }
+            CType::Void => return Err("void".into()),
+            CType::Map(_, _) => return Err("map".into()),
+            CType::Result(_, _) => return Err("result".into()),
+            CType::Opt(_) => return Err("opt".into()),
+        })
+    }
+
+    /// v0.3.2: emit `static bool lingo_eq_<S>(<S> a, <S> b) { return f1 && f2 && ...; }`.
+    /// If any field is non-eq-able, emit a body that calls `__builtin_trap()`
+    /// after an `#error` would be too aggressive — instead we emit a
+    /// helper that always returns `false` and gate `==` use at the call
+    /// site below.  Approach taken: track per-struct `eq_supported` bit.
+    fn emit_struct_eq_helper(&mut self, s: &StructDecl) -> Result<(), LingoError> {
+        let fields = self.structs[&s.name].clone();
+        let mut parts: Vec<String> = Vec::with_capacity(fields.len());
+        let mut unsupported: Option<String> = None;
+        for (fname, fty) in &fields {
+            let a = format!("a.{}", fname);
+            let b = format!("b.{}", fname);
+            match self.field_eq_expr(fty, &a, &b) {
+                Ok(e) => parts.push(e),
+                Err(kind) => {
+                    unsupported = Some(format!("`{}.{}` of type {}", s.name, fname, kind));
+                    break;
+                }
+            }
+        }
+        writeln!(self.body, "static bool lingo_eq_{n}({n} a, {n} b) {{", n = s.name).unwrap();
+        if let Some(reason) = unsupported {
+            // Helper still emitted so cross-type references compile, but
+            // returns false unconditionally — actual `==` use will be
+            // rejected at the call site (see `BinOp::Eq` below).
+            self.struct_eq_unsupported.insert(s.name.clone(), reason);
+            writeln!(self.body, "    (void)a; (void)b; return false; /* not eq-able */").unwrap();
+        } else if parts.is_empty() {
+            // Field-less struct: two values of the same type are always equal.
+            writeln!(self.body, "    (void)a; (void)b; return true;").unwrap();
+        } else {
+            writeln!(self.body, "    return {};", parts.join(" && ")).unwrap();
+        }
+        writeln!(self.body, "}}\n").unwrap();
+        Ok(())
+    }
+
+    /// v0.3.2: enum eq helper — tag check + per-variant payload check.
+    fn emit_enum_eq_helper(&mut self, e: &EnumDecl) -> Result<(), LingoError> {
+        let mut unsupported: Option<String> = None;
+        let mut arms: Vec<(String, String)> = Vec::new();
+        for v in &e.variants {
+            if v.payload.is_empty() {
+                arms.push((v.name.clone(), "return true;".to_string()));
+                continue;
+            }
+            let mut parts: Vec<String> = Vec::new();
+            let mut failed = false;
+            for (i, p) in v.payload.iter().enumerate() {
+                let ty = match map_type_with(p, v.span, Some(&self.structs), Some(&self.enums)) {
+                    Ok(t) => t,
+                    Err(_) => { failed = true; break; }
+                };
+                let a = format!("a.as.{}._{}", v.name, i);
+                let b = format!("b.as.{}._{}", v.name, i);
+                match self.field_eq_expr(&ty, &a, &b) {
+                    Ok(s) => parts.push(s),
+                    Err(kind) => {
+                        unsupported = Some(format!("`{}.{}` payload of type {}", e.name, v.name, kind));
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed && unsupported.is_some() { break; }
+            arms.push((v.name.clone(), format!("return {};", parts.join(" && "))));
+        }
+        writeln!(self.body, "static bool lingo_eq_{n}({n} a, {n} b) {{", n = e.name).unwrap();
+        if let Some(reason) = unsupported {
+            self.struct_eq_unsupported.insert(e.name.clone(), reason);
+            writeln!(self.body, "    (void)a; (void)b; return false; /* not eq-able */").unwrap();
+        } else {
+            writeln!(self.body, "    if (a.tag != b.tag) return false;").unwrap();
+            writeln!(self.body, "    switch (a.tag) {{").unwrap();
+            for (vn, body) in arms {
+                writeln!(self.body, "    case {n}_{vn}_TAG: {{ {body} }}", n = e.name, vn = vn, body = body).unwrap();
+            }
+            writeln!(self.body, "    }}").unwrap();
+            writeln!(self.body, "    return false;").unwrap();
+        }
+        writeln!(self.body, "}}\n").unwrap();
+        Ok(())
     }
 
     /// Register a function signature in `self.fn_sigs`.
@@ -2802,17 +2964,49 @@ impl Codegen {
                 };
                 Ok((format!("lingo_ipow({}, {})", a_code, b_code), ty))
             }
-            BinOp::Eq => {
+            BinOp::Eq | BinOp::Ne => {
+                let negate = op == BinOp::Ne;
                 if a_ty == CType::Str && b_ty == CType::Str {
-                    return Ok((format!("(strcmp({}, {}) == 0)", a_code, b_code), CType::Bool));
+                    let sym = if negate { "!= 0" } else { "== 0" };
+                    return Ok((format!("(strcmp({}, {}) {})", a_code, b_code, sym), CType::Bool));
                 }
-                Ok((format!("({} == {})", a_code, b_code), CType::Bool))
-            }
-            BinOp::Ne => {
-                if a_ty == CType::Str && b_ty == CType::Str {
-                    return Ok((format!("(strcmp({}, {}) != 0)", a_code, b_code), CType::Bool));
+                // v0.3.2: structural eq on structs, enums, and vecs.
+                // Both sides must match in kind+name (the resolver already
+                // enforces this for structs/enums via type checking at
+                // ident sites; we double-check here for robustness).
+                let compound = match (&a_ty, &b_ty) {
+                    (CType::Struct(an), CType::Struct(bn)) if an == bn => Some(an.clone()),
+                    (CType::Enum(an), CType::Enum(bn)) if an == bn => Some(an.clone()),
+                    (CType::Vec(_), CType::Vec(_)) if a_ty == b_ty => None,  // handled below
+                    _ => None,
+                };
+                if let Some(name) = compound {
+                    if let Some(reason) = self.struct_eq_unsupported.get(&name) {
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!(
+                                "C backend: cannot compare values of type `{}` with `==` — {} is not structurally comparable",
+                                name, reason,
+                            ),
+                            a.span,
+                        ));
+                    }
+                    let call = format!("lingo_eq_{}({}, {})", name, a_code, b_code);
+                    return Ok((
+                        if negate { format!("(!{})", call) } else { call },
+                        CType::Bool,
+                    ));
                 }
-                Ok((format!("({} != {})", a_code, b_code), CType::Bool))
+                if matches!(&a_ty, CType::Vec(_)) && a_ty == b_ty {
+                    let s = self.field_eq_expr(&a_ty, &a_code, &b_code).map_err(|kind| LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: cannot compare `vec[...]` containing `{}` with `==`", kind),
+                        a.span,
+                    ))?;
+                    return Ok((if negate { format!("(!{})", s) } else { s }, CType::Bool));
+                }
+                let sym = if negate { "!=" } else { "==" };
+                Ok((format!("({} {} {})", a_code, sym, b_code), CType::Bool))
             }
             BinOp::Lt => Ok((format!("({} <  {})", a_code, b_code), CType::Bool)),
             BinOp::Le => Ok((format!("({} <= {})", a_code, b_code), CType::Bool)),

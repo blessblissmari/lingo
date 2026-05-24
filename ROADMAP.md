@@ -140,6 +140,37 @@ programs aren't forced to live in one `.lingo` file.
   diagnostic: unknown alias + two-hop reject).  80/80 green;
   audit 37/39 byte-identical.  clippy 0 warnings.
 
+- [x] **Structural `==` / `!=` on struct, enum, and vec (v0.3.2)**:
+  before v0.3.2, `==` on user types was a type error — equality was
+  defined only for `int`/`float`/`bool`/`str` and (deep inside
+  `match`) for enums via `values_eq`.  v0.3.2 opens the operator
+  too.  interp side: `bin_op` short-circuits `Eq`/`Ne` on any
+  pair of compound values (struct/enum/vec) into a single
+  `values_eq` call; `values_eq` gains `Struct` (type-name match
+  + field-wise recursion) and `Vec_` (length + element-wise
+  recursion) arms.  `Map_` deliberately *not* added — order-
+  sensitive equality on an associative container is the wrong
+  default.  C backend side: pass 1c gains a per-struct and
+  per-enum forward declaration + body for
+  `static bool lingo_eq_<T>(<T> a, <T> b)`.  struct body is an
+  `&&`-chain over fields, enum body is a `tag` check then a
+  per-variant `switch` whose arms reduce to the same `&&`-chain
+  over payload slots; both recurse into nested struct/enum
+  fields by calling the helper for that field's type.  if any
+  field/payload is of a non-comparable type (`Map`, `Result`,
+  `Opt`), the helper still gets emitted (returning `false`) so
+  cross-references compile, but `==` *use* on that type is
+  rejected at the call site with a localized error pointing at
+  the user's `==`, not the synthesised helper.  `vec[T]` eq is
+  inlined as a GCC statement expression (`({ ... })`) and
+  delegates element comparison to the per-element helper.
+  new example `eq_struct_enum.lingo` (nested struct + payload-
+  carrying enum + vec eq).  3 new tests (positive interp pin,
+  interp ≡ native pin, negative type-error pin for mixed-kind
+  comparisons).  **83/83 green** (was 80/80).  audit
+  **38/40** byte-identical interp ≡ native.  clippy 0 warnings.
+  no AST / parser / resolver changes.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers

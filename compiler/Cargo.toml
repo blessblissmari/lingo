@@ -1,6 +1,6 @@
 [package]
 name = "lingoc"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Bootstrap compiler / interpreter for the lingo language"
 license = "MIT"
