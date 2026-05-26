@@ -647,6 +647,29 @@ fn c_backend_str_find_native_matches_interp() {
     assert_eq!(native_out, interp_out);
 }
 
+/// v0.3.8: `Opt[T]` as a fn parameter / return type — closes the
+/// limitation called out in v0.3.7.  `map_type_with` now has an `Opt`
+/// arm next to `vec`/`map`/`Result`, and `register_compound_types`
+/// walks every signature so the typedef + per-T formatter get
+/// emitted even when no call site mentions Opt construction.
+#[test]
+fn opt_param_interp() {
+    let (out, _stderr, code) = run("opt_param_native.lingo");
+    assert_eq!(code, 0);
+    assert!(out.contains("the: some(0)"), "missing the-at-0:\n{out}");
+    assert!(out.contains("fox: some(16)"), "missing fox-at-16:\n{out}");
+    assert!(out.contains("xyz: none"), "missing none arm:\n{out}");
+    assert!(out.contains("quick: some(4)"), "missing explicit Opt[int] let:\n{out}");
+}
+
+#[test]
+fn c_backend_opt_param_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("opt_param_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("opt_param_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
 #[test]
 fn c_backend_str_repeat_negative_runtime_error() {
     if which_cc().is_none() { return; }

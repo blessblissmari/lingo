@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.3.7 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  v0.3.0 brought multi-file modules; v0.3.1 added cross-module type refs and struct literals; v0.3.2 opened `==`/`!=` to user types; v0.3.3 added the `to_str(v)` builtin; v0.3.4 closed `s.replace` in native; v0.3.5 added `vec.reverse()` + `vec.clear()` in native; v0.3.6 introduced `s.repeat(n)` on both backends; v0.3.7 adds `s.find(needle) -> Opt[int]` on both backends — the second dual-backend method since the v0.3.x line started, exercising the v0.2.1 `Opt` machinery.  97/97 integration tests green; **43/45 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  No re-exports, no `import *`, no privacy.
+> ⚠️ **status:** v0.3.8 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  v0.3.0 brought multi-file modules; v0.3.1 added cross-module type refs and struct literals; v0.3.2 opened `==`/`!=` to user types; v0.3.3 added the `to_str(v)` builtin; v0.3.4 closed `s.replace` in native; v0.3.5 added `vec.reverse()` + `vec.clear()` in native; v0.3.6 introduced `s.repeat(n)` on both backends; v0.3.7 added `s.find(needle) -> Opt[int]` on both backends; v0.3.8 lifts `Opt[T]` to a first-class type annotation in the C backend (param, return, let-binding, struct field) — closes the v0.3.7 limitation, and per-T `lingo_opt_<T>_str` formatters are now emitted for every signature suffix the user touches.  99/99 integration tests green; **44/46 applicable examples** byte-identical interp ≡ native.  clippy 0 warnings.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -136,7 +136,7 @@ fn main():
 9. **traits for behaviour, structs for data.** no inheritance.
 10. **native backend + monomorphized generics** → target: within 10% of zig.
 
-## what works today (v0.3.7)
+## what works today (v0.3.8)
 
 ### interpreter
 
@@ -232,6 +232,7 @@ native-capable:
 [`vec_reverse_native`](compiler/examples/vec_reverse_native.lingo) ·
 [`str_repeat_native`](compiler/examples/str_repeat_native.lingo) ·
 [`str_find_native`](compiler/examples/str_find_native.lingo) ·
+[`opt_param_native`](compiler/examples/opt_param_native.lingo) ·
 [`parse_port`](compiler/examples/parse_port.lingo)
 
 interp-only (waiting on `?`/`!E` lowering, trait vtables, or `T!E` lowering):

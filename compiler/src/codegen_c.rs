@@ -293,6 +293,36 @@ fn map_type_with(
         }
         return Ok(CType::Map(Box::new(k), Box::new(v)));
     }
+    if t.name == "Opt" {
+        // v0.3.8: `Opt[T]` lands as a first-class type annotation —
+        // accepted in fn params, return types, struct fields, etc.
+        // The actual `lingo_opt_<T>_t` typedef + `lingo_opt_<T>_str`
+        // formatter are emitted by `gen_program` based on the
+        // `self.opt_types` BTreeSet, which `Codegen::register_opts_in`
+        // populates by walking signatures after this pass.  Inner
+        // element type must be one we already know how to monomorphize
+        // — same restriction as `vec[T]`.
+        if t.type_args.len() != 1 {
+            return Err(LingoError::new(
+                Stage::Resolve,
+                "C backend: `Opt` needs exactly one type argument, e.g. `Opt[int]`",
+                span,
+            ));
+        }
+        let inner = map_type_with(&t.type_args[0], span, structs, enums)?;
+        match &inner {
+            CType::I64 | CType::U64 | CType::F64 | CType::Bool | CType::Str
+            | CType::Struct(_) | CType::Enum(_) => {}
+            other => return Err(LingoError::new(
+                Stage::Resolve,
+                format!("C backend: `Opt[{}]` not supported yet \
+                         (have: int/i64/u64/f64/bool/str, structs, enums)",
+                        other.c_decl()),
+                span,
+            )),
+        }
+        return Ok(CType::Opt(Box::new(inner)));
+    }
     if !t.type_args.is_empty() {
         return Err(LingoError::new(
             Stage::Resolve,
@@ -938,6 +968,35 @@ impl Codegen {
             writeln!(out, "    return outbuf;").unwrap();
             writeln!(out, "}}\n").unwrap();
         }
+        // v0.3.8: emit per-T `lingo_opt_<sfx>_str` formatters for every
+        // suffix the user's signatures touched (params, returns, etc.).
+        // The static splice still defines `lingo_opt_i64_str` (so the
+        // unconditional v0.2.1 reservation keeps compiling), so we skip
+        // i64 here.  Non-i64 inner types route through the same shape
+        // as the show_<T> helpers — primitives via cast + lingo_fmt_alloc,
+        // strings as a passthrough, structs/enums via their per-type
+        // show helper.
+        let opt_types_to_emit: Vec<String> = self.opt_types
+            .iter()
+            .filter(|s| s.as_str() != "i64")
+            .cloned()
+            .collect();
+        for suffix in opt_types_to_emit {
+            let inner_fmt = match suffix.as_str() {
+                "u64"  => "lingo_fmt_alloc(\"%llu\", (unsigned long long)o.val)".to_string(),
+                "f64"  => "lingo_f64_str(o.val)".to_string(),
+                "bool" => "(o.val ? \"true\" : \"false\")".to_string(),
+                "str"  => "(o.val ? o.val : \"\")".to_string(),
+                // structs / enums route through their own show helper —
+                // emit_struct_show_helper / emit_enum_show_helper land
+                // these in self.body before user fn bodies.
+                user => format!("lingo_show_{}(o.val)", user),
+            };
+            writeln!(out,
+                "__attribute__((unused)) static const char* lingo_opt_{sfx}_str(lingo_opt_{sfx}_t o) {{ \
+                 return o.is_some ? {inner_fmt} : \"none\"; }}",
+                sfx = suffix, inner_fmt = inner_fmt).unwrap();
+        }
         out.push_str(&self.protos);
         out.push('\n');
         out.push_str(&self.body);
@@ -1283,8 +1342,41 @@ impl Codegen {
         };
         let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
         self.fn_param_names.insert(name.clone(), param_names);
+        // v0.3.8: walk the full signature for nested `Opt[T]` / `Result[T,E]`
+        // so the corresponding typedefs get emitted even when the user never
+        // *constructs* the value at a call site (e.g. takes one as a param
+        // and returns it unchanged).
+        for p in &params { self.register_compound_types(p); }
+        self.register_compound_types(&ret);
         self.fn_sigs.insert(name, (params, ret));
         Ok(())
+    }
+
+    /// v0.3.8: walk a CType and register every `Opt[T]` suffix into
+    /// `self.opt_types` and every `Result[T, E]` pair into
+    /// `self.result_pairs`.  Idempotent — `BTreeSet::insert` skips
+    /// duplicates.  Used by `register_fn_sig` so signatures alone are
+    /// enough to drive typedef emission, without waiting for a call
+    /// site to populate the sets opportunistically.
+    fn register_compound_types(&mut self, ty: &CType) {
+        match ty {
+            CType::Opt(inner) => {
+                self.opt_types.insert(inner.mono_suffix());
+                self.register_compound_types(inner);
+            }
+            CType::Result(t, e) => {
+                let e_sfx = match e.as_ref() {
+                    CType::Enum(n) => n.clone(),
+                    CType::Str => "str".to_string(),
+                    _ => return,  // unsupported error type — flagged at use
+                };
+                self.result_pairs.insert((t.mono_suffix(), e_sfx));
+                self.register_compound_types(t);
+            }
+            CType::Vec(inner) => self.register_compound_types(inner),
+            CType::Map(_, v) => self.register_compound_types(v),
+            _ => {}
+        }
     }
 
     /// Build a C-style prototype `RetType name(T0 p0, T1 p1, ...)`.

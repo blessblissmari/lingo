@@ -1,0 +1,23 @@
+# v0.3.8: Opt[T] is now accepted as a parameter / return type in the
+# C backend, not just as a method return value or pattern.
+# Allows factoring `match opt:` boilerplate into helper functions.
+
+fn show_opt_int(label: str, opt: Opt[int]):
+    match opt:
+        some(i):
+            print(f"{label}: some({i})")
+        none:
+            print(f"{label}: none")
+
+fn lookup(s: str, needle: str) -> Opt[int]:
+    return s.find(needle)
+
+fn main():
+    let s = "the quick brown fox"
+    show_opt_int("the", lookup(s, "the"))
+    show_opt_int("fox", lookup(s, "fox"))
+    show_opt_int("xyz", lookup(s, "xyz"))
+
+    # explicit binding with an Opt[int] type annotation.
+    let p: Opt[int] = lookup(s, "quick")
+    show_opt_int("quick", p)

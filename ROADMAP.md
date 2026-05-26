@@ -313,6 +313,33 @@ programs aren't forced to live in one `.lingo` file.
   (was 95/95).  audit **43/45** byte-identical.  clippy 0
   warnings.
 
+- [x] **`Opt[T]` as a first-class type annotation (v0.3.8)**:
+  closes the limitation called out in v0.3.7.  `map_type_with`
+  gained an `Opt` arm next to `vec`/`map`/`Result` — accepts
+  primitives, structs, and enums as the inner type with the
+  same monomorphization-friendly restrictions as `vec[T]`.
+  A new helper `register_compound_types(&mut self, ty)` walks
+  every CType recursively and registers nested `Opt[T]` /
+  `Result[T,E]` suffixes into `self.opt_types` and
+  `self.result_pairs`; `register_fn_sig` calls it for each
+  param + return type so signatures alone drive typedef
+  emission, without waiting for a call site.  Per-T
+  `lingo_opt_<sfx>_str` formatters are now emitted in
+  `gen_program` after the `lingo_show_vec_<T>` block — one
+  per non-`i64` suffix in `self.opt_types`, with appropriate
+  inner-type formatting (primitives via `lingo_fmt_alloc`,
+  strings as passthrough, structs/enums via their per-type
+  `lingo_show_<T>` helper).  `i64` stays in the static splice
+  for backward compat.  Net effect: `fn show_opt(o: Opt[int])`
+  / `fn lookup() -> Opt[int]` / `let p: Opt[int] = ...`
+  all work end-to-end on both backends, byte-identical.  new
+  example `opt_param_native.lingo` (helper fn taking
+  `Opt[int]`, helper fn returning `Opt[int]`, explicit type
+  annotation on a let).  2 new tests (`opt_param_interp`,
+  `c_backend_opt_param_native_matches_interp`).  **99/99
+  green** (was 97/97).  audit **44/46** byte-identical.
+  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers
