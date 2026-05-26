@@ -499,6 +499,108 @@ fn c_backend_str_methods_native_matches_interp() {
     assert_eq!(native_out, interp_out);
 }
 
+/// v0.3.4: `s.replace(from, to)` lands in the C backend.  The interp
+/// has had it since v0.1; this test pins byte-for-byte parity.
+#[test]
+fn str_replace_interp() {
+    let (out, _stderr, code) = run("str_replace_native.lingo");
+    assert_eq!(code, 0);
+    // Sanity-check a few specific lines so a future regression in the
+    // interp itself (not just the C backend) is loud.
+    assert!(out.contains("hell0, w0rld"), "missing literal substitution:\n{out}");
+    assert!(out.contains("the_quick_brown_fox"), "missing space->underscore:\n{out}");
+    assert!(out.contains("a -> b -> c -> d"), "missing growing replacement:\n{out}");
+    assert!(out.contains("xxxx"), "missing shrinking replacement:\n{out}");
+}
+
+#[test]
+fn c_backend_str_replace_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("str_replace_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("str_replace_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+/// v0.3.4: empty `from` is rejected at runtime in the C backend (the
+/// interp delegates to Rust's codepoint-aware `String::replace` there,
+/// which we can't replicate bytewise without a real UTF-8 decoder).
+/// We pin the diagnostic so a future native impl can't silently change
+/// the contract.
+#[test]
+fn c_backend_str_replace_empty_from_runtime_error() {
+    let project_root = std::env::current_dir().expect("cwd");
+    let path = std::env::temp_dir().join("lingo_replace_empty_from.lingo");
+    std::fs::write(
+        &path,
+        "fn main():\n    let s = \"abc\"\n    print(s.replace(\"\", \"X\"))\n",
+    )
+    .unwrap();
+    if which_cc().is_none() { return; }
+    let work_dir = std::env::temp_dir().join("lingo_replace_empty_from_build");
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir).expect("scratch dir");
+    let build = Command::new(cargo_bin())
+        .current_dir(&work_dir)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("failed to invoke lingo build");
+    assert!(build.status.success(), "build failed: {}", String::from_utf8_lossy(&build.stderr));
+    let bin = work_dir.join(path.file_stem().unwrap());
+    let run = Command::new(&bin).current_dir(&work_dir).output().expect("run native");
+    let _ = project_root;
+    assert!(!run.status.success(), "native should reject empty `from` at runtime");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("str.replace: empty `from`"),
+        "expected diagnostic about empty `from`, got:\n{stderr}"
+    );
+}
+
+/// v0.3.5: `vec.reverse()` and `vec.clear()` land in the C backend.
+/// Both are mutating, receiver must be a plain ident — same restriction
+/// as `push`/`pop`/`set`.  `clear` keeps the backing buffer alive so the
+/// next `push` reuses it (matches interp `Vec::clear`).
+#[test]
+fn vec_reverse_clear_interp() {
+    let (out, _stderr, code) = run("vec_reverse_native.lingo");
+    assert_eq!(code, 0);
+    assert!(out.contains("vec[5, 4, 3, 2, 1]"), "missing i64 reverse:\n{out}");
+    assert!(out.contains("vec[fox, brown, quick, the]"), "missing str reverse:\n{out}");
+    assert!(out.contains("len before clear: 3"), "missing pre-clear len:\n{out}");
+    assert!(out.contains("len after clear: 0"), "missing post-clear len:\n{out}");
+    assert!(out.contains("vec[99, 100]"), "missing post-clear push:\n{out}");
+}
+
+#[test]
+fn c_backend_vec_reverse_clear_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("vec_reverse_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("vec_reverse_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+/// `vec.clear()` and `vec.reverse()` are mutating, so the receiver
+/// must be a plain variable — same restriction as `push`/`pop`/`set`.
+/// Calling them on a literal must produce a clear diagnostic.
+#[test]
+fn c_backend_vec_clear_rejects_literal_receiver() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_vec_clear_literal.lingo");
+    std::fs::write(
+        &path,
+        "fn main():\n    vec[1, 2, 3].clear()\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin).arg("build").arg(&path).output().expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject vec.clear on literal");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`vec.clear` receiver must be a plain variable"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
 #[test]
 fn c_backend_greet_native_matches_interp() {
     // f-string interpolation of struct values is the v0.1.22 unlock.

@@ -200,6 +200,63 @@ programs aren't forced to live in one `.lingo` file.
   new example, the failures are the same two preexisting non-
   matchers — neither involves `to_str`).  clippy 0 warnings.
 
+- [x] **`s.replace(from, to)` in native (v0.3.4)**:
+  closes the last common-string-method gap between interp and
+  the C backend.  the interp has had `replace` since v0.1; the
+  C backend now lowers `s.replace(from, to)` to a new
+  `lingo_str_replace` runtime helper next to `lingo_str_split`.
+  two-pass: first counts non-overlapping occurrences of `from`
+  in `s`, then allocates exactly `s_len + count*(to_len -
+  from_len) + 1` bytes and copies + substitutes in one sweep.
+  matches Rust's `str::replace` byte-for-byte for non-empty
+  `from` on ASCII (and on UTF-8 too, when `from` itself is
+  valid UTF-8 — the substitution happens at codepoint-aligned
+  positions).  empty `from` is rejected at runtime — the
+  interp delegates to Rust's codepoint-aware behaviour there
+  and we can't replicate it bytewise without a real UTF-8
+  decoder; the diagnostic mirrors `lingo_str_split`'s
+  empty-separator one (`str.replace: empty `from` not supported
+  yet`).  `gen_str_method` gained the `("replace", 2)` arm and
+  the empty-vec back-inference table gained the `(Str,
+  "replace") -> Str` row so `let mut acc = vec[]` followed by
+  `acc.push(s.replace(...))` infers the element type
+  correctly.  no AST / parser / interp changes — pure C
+  backend work.  new example `str_replace_native.lingo`
+  (literal sub, multi-occurrence remove, no-match identity,
+  space → underscore, `to_lower` chained with `replace`,
+  growing replacement, shrinking replacement).  3 new tests
+  (`str_replace_interp`, `c_backend_str_replace_native_matches_interp`,
+  `c_backend_str_replace_empty_from_runtime_error`).  **89/89
+  green** (was 86/86).  audit **40/42** byte-identical interp
+  ≡ native (the +1 is the new example, the 2 skips are still
+  the preexisting interactive `io_roundtrip` +
+  `fib_native_bench`).  clippy 0 warnings.
+
+- [x] **`vec.reverse()` and `vec.clear()` in native (v0.3.5)**:
+  closes the next common-vec-method gap between interp and
+  the C backend.  both methods are mutating and in-place, so
+  the receiver must be a plain variable (same restriction as
+  `push`/`pop`/`set`).  `clear` keeps the backing buffer
+  alive — `data` and `cap` survive, only `len` resets to 0 —
+  so a `push` after `clear` reuses the slab without
+  reallocating, matching the interp's `Vec::clear` semantics.
+  `reverse` swaps in pairs from both ends with a single loop
+  bounded by `len/2`; `len < 2` is a natural no-op.  Both
+  helpers are emitted three times in the static prelude (one
+  per `i64`/`f64`/`str`) and once per user struct/enum via
+  `emit_user_vec_runtime`, so `vec[Point].reverse()` works
+  end-to-end alongside the primitives.  `gen_vec_method`
+  gained the `("clear", 0)` and `("reverse", 0)` arms next
+  to `pop` / `set`; the catch-all error string now lists the
+  full method set.  new example `vec_reverse_native.lingo`
+  (i64 reverse, str reverse, len-0/1 no-op smoke checks, clear
+  + push reuse, combined reverse-then-clear).  3 new tests
+  (`vec_reverse_clear_interp`,
+  `c_backend_vec_reverse_clear_native_matches_interp`,
+  `c_backend_vec_clear_rejects_literal_receiver`).  **92/92
+  green** (was 89/89).  audit **41/43** byte-identical (the
+  +1 is the new example).  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers
