@@ -1371,6 +1371,7 @@ impl Codegen {
                             (CType::Str, "to_upper") => Some(CType::Str),
                             (CType::Str, "to_lower") => Some(CType::Str),
                             (CType::Str, "replace") => Some(CType::Str),
+                            (CType::Str, "repeat") => Some(CType::Str),
                             (CType::Str, "len") => Some(CType::I64),
                             (CType::Str, "split") => Some(CType::Vec(Box::new(CType::Str))),
                             (CType::Str, "concat") => Some(CType::Str),
@@ -3379,10 +3380,34 @@ impl Codegen {
                     CType::Str,
                 ))
             }
+            ("repeat", 1) => {
+                // v0.3.6: `s.repeat(n)` — `n` must be `int`.  Negative `n`
+                // is a runtime error (matches the interp's contract).
+                let a = &args[0];
+                if a.name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `str.repeat` takes a positional int",
+                        a.span,
+                    ));
+                }
+                let (c, t) = self.gen_expr(&a.value)?;
+                if t != CType::I64 {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `str.repeat` count must be int, got `{}`", t.c_decl()),
+                        a.span,
+                    ));
+                }
+                Ok((
+                    format!("lingo_str_repeat({}, {})", recv_code, c),
+                    CType::Str,
+                ))
+            }
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `str.{}` with {} arg(s) is not supported yet \
-                         (have: len/0, contains/1, starts_with/1, ends_with/1)", m, n),
+                         (have: len/0, contains/1, starts_with/1, ends_with/1, to_upper/0, to_lower/0, trim/0, split/1, replace/2, repeat/1)", m, n),
                 span,
             )),
         }
@@ -4125,6 +4150,42 @@ static const char* lingo_str_to_lower(const char* s) {
         out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
     }
     out[n] = '\\0';
+    return out;
+}
+
+/* Repeat `s` `n` times into a fresh malloc'd buffer (v0.3.6).  Matches
+ * Rust's `str::repeat` for non-negative `n`; negative `n` is rejected at
+ * runtime with a clear message (the Rust impl panics on usize overflow,
+ * we surface the contract earlier).  Single allocation sized to exactly
+ * `n*s_len + 1` bytes; copies in a tight loop.  `n == 0` returns empty. */
+__attribute__((unused))
+static const char* lingo_str_repeat(const char* s, int64_t n) {
+    if (n < 0) {
+        fprintf(stderr, \"lingo: str.repeat: count must be non-negative, got %\" PRId64 \"\\n\", n);
+        exit(1);
+    }
+    if (n == 0) {
+        char* out = (char*)malloc(1);
+        if (!out) { fprintf(stderr, \"lingo: oom in str_repeat\\n\"); exit(1); }
+        out[0] = '\\0';
+        return out;
+    }
+    size_t s_len = strlen(s);
+    /* overflow check: if n*s_len overflows size_t we'd write past the
+     * allocation.  Use a divide instead of multiply to detect early. */
+    if (s_len != 0 && (size_t)n > (SIZE_MAX - 1) / s_len) {
+        fprintf(stderr, \"lingo: str.repeat: result too large\\n\");
+        exit(1);
+    }
+    size_t total = (size_t)n * s_len;
+    char* out = (char*)malloc(total + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in str_repeat\\n\"); exit(1); }
+    char* p = out;
+    for (int64_t i = 0; i < n; i++) {
+        memcpy(p, s, s_len);
+        p += s_len;
+    }
+    *p = '\\0';
     return out;
 }
 

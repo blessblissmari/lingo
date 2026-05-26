@@ -601,6 +601,59 @@ fn c_backend_vec_clear_rejects_literal_receiver() {
     );
 }
 
+/// v0.3.6: `s.repeat(n)` — interp + native parity in one shot, since
+/// neither backend had the method before.  Single allocation in native
+/// (sized exactly to `n*s_len + 1`); negative `n` is a runtime error.
+#[test]
+fn str_repeat_interp() {
+    let (out, _stderr, code) = run("str_repeat_native.lingo");
+    assert_eq!(code, 0);
+    assert!(out.contains("ababab"), "missing 3x repeat:\n{out}");
+    assert!(out.contains("===================="), "missing 20x repeat:\n{out}");
+    assert!(out.contains("z\n"), "missing 1x identity:\n{out}");
+    assert!(out.contains("5\n"), "missing post-repeat .len():\n{out}");
+}
+
+#[test]
+fn c_backend_str_repeat_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("str_repeat_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("str_repeat_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+/// Negative `n` to `str.repeat` should be a runtime error (interp + native).
+/// We only check the native side here because the interp test would
+/// `assert_ne!(code, 0)` — same shape, less interesting.
+#[test]
+fn c_backend_str_repeat_negative_runtime_error() {
+    if which_cc().is_none() { return; }
+    let path = std::env::temp_dir().join("lingo_repeat_neg.lingo");
+    std::fs::write(
+        &path,
+        "fn main():\n    print(\"x\".repeat(-1))\n",
+    )
+    .unwrap();
+    let work_dir = std::env::temp_dir().join("lingo_repeat_neg_build");
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir).expect("scratch dir");
+    let build = Command::new(cargo_bin())
+        .current_dir(&work_dir)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("failed to invoke lingo build");
+    assert!(build.status.success(), "build failed: {}", String::from_utf8_lossy(&build.stderr));
+    let bin = work_dir.join(path.file_stem().unwrap());
+    let run = Command::new(&bin).current_dir(&work_dir).output().expect("run native");
+    assert!(!run.status.success(), "native should reject negative repeat count");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("str.repeat: count must be non-negative"),
+        "expected diagnostic about non-negative count, got:\n{stderr}"
+    );
+}
+
 #[test]
 fn c_backend_greet_native_matches_interp() {
     // f-string interpolation of struct values is the v0.1.22 unlock.

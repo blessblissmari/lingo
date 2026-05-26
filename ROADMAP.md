@@ -257,6 +257,33 @@ programs aren't forced to live in one `.lingo` file.
   green** (was 89/89).  audit **41/43** byte-identical (the
   +1 is the new example).  clippy 0 warnings.
 
+- [x] **`s.repeat(n)` on both backends (v0.3.6)**:
+  first dual-backend new method since the v0.3.x line started
+  — neither interp nor C backend had `repeat` before.  The
+  semantics match Rust's `str::repeat` for non-negative `n`:
+  `s.repeat(3)` on `"ab"` returns `"ababab"`, `s.repeat(0)`
+  returns `""`, `s.repeat(1)` is identity.  Negative `n` is
+  rejected at runtime in both backends with the same
+  `str.repeat: count must be non-negative` message — surfacing
+  the contract earlier than Rust's panic-on-usize-overflow.
+  C backend gains a `lingo_str_repeat(const char*, int64_t)`
+  runtime helper next to `lingo_str_replace`: single
+  allocation sized to exactly `n*s_len + 1` bytes (with an
+  early overflow check via division so `n` × `s_len` can't
+  silently wrap `size_t`), then a tight `memcpy` loop.  Empty
+  result for `n==0` is a 1-byte `'\0'` allocation so callers
+  always get a real heap pointer (consistent with the rest of
+  the str runtime).  `gen_str_method` gained the
+  `("repeat", 1)` arm; the empty-vec back-inference table
+  gained the `(Str, "repeat") -> Str` row.  new example
+  `str_repeat_native.lingo` (3x repeat, 20x banner, 0x empty,
+  1x identity, post-repeat `.len()`, chained inside f-strings).
+  3 new tests (`str_repeat_interp`,
+  `c_backend_str_repeat_native_matches_interp`,
+  `c_backend_str_repeat_negative_runtime_error`).  **95/95
+  green** (was 92/92).  audit **42/44** byte-identical.
+  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers
