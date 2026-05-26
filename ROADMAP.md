@@ -284,6 +284,35 @@ programs aren't forced to live in one `.lingo` file.
   green** (was 92/92).  audit **42/44** byte-identical.
   clippy 0 warnings.
 
+- [x] **`s.find(needle) -> Opt[int]` on both backends (v0.3.7)**:
+  second dual-backend new method.  Returns the byte position
+  (0-based) of the first occurrence of `needle` in `s`, or
+  `none`.  Empty `needle` always matches at position 0
+  (Rust's `str::find("")` semantics).  Returns bytes-not-chars
+  to align with `s.len()` and the C `strstr` semantics; for
+  ASCII the bytes count == char count.  *Interp*: dispatch
+  arm in the str method table calls `s.find(&needle)` and
+  wraps the result in `Value::Opt`.  *C backend*: `find`
+  lowers to a stmt-expr `({ const char* p = strstr(s, n);
+  p ? (lingo_opt_i64_t){ true, p - s } : { false, 0 }; })`
+  reusing the unconditionally-reserved `lingo_opt_i64_t`
+  typedef from v0.2.1 — no new runtime helpers needed, just
+  a 6-line GCC stmt-expr.  Empty-vec back-inference table
+  gained the `(Str, "find") -> Opt[i64]` row so a `let mut
+  acc = vec[]; acc.push(s.find(...))` would back-infer to
+  `vec[Opt[i64]]` (typedef + helpers would be wired through
+  the existing struct-of-Opt path on demand; for v0.3.7 we
+  don't ship that example).  *Limitation called out for
+  v0.3.8*: `Opt[T]` as a function parameter type
+  (`fn show(o: Opt[int]):`) is not yet accepted by the C
+  backend's `map_type_with` — it needs an explicit `Opt`
+  arm next to `vec`/`map`/`Result`.  The example uses inline
+  `match` instead of factoring into a helper fn.  new example
+  `str_find_native.lingo`.  2 new tests (`str_find_interp`,
+  `c_backend_str_find_native_matches_interp`).  **97/97 green**
+  (was 95/95).  audit **43/45** byte-identical.  clippy 0
+  warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers

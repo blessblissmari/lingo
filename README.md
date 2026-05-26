@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.3.6 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  **Modules (v0.3.0):** `import foo` reads `foo.lingo`; `import foo.bar` reads `foo/bar.lingo`; `import foo as f` renames the alias.  The alias is the only way to reach another module's top-level names — `f.fn()`, `f.CONST`, `f.MyEnum.Variant`.  Cycle / duplicate-alias / missing-target diagnostics are mandatory.  **Cross-module types (v0.3.1):** `fn f() -> bar.Point`, `let p: bar.Point = ...`, `vec[bar.Point]`, and `bar.Point{x: 1, y: 2}` all work — the resolver rewrites every dotted reference to a flat ident before the interp / C backend runs.  **Structural eq (v0.3.2):** `==` and `!=` work field-wise on structs, tag+payload-wise on enums, element-wise on `vec[T]`.  **`to_str(v)` (v0.3.3):** builtin stringifier in the same display shape as `print`.  **`s.replace(from, to)` in native (v0.3.4):** non-empty `from` only.  **`vec.reverse()` + `vec.clear()` in native (v0.3.5):** mutating, plain-ident receiver; `clear` keeps the backing buffer alive.  **`s.repeat(n)` on both backends (v0.3.6):** first dual-backend new method since v0.3.x started; matches Rust `str::repeat` for `n ≥ 0`, negative `n` is a runtime error.  95/95 integration tests green; **42/44 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.
+> ⚠️ **status:** v0.3.7 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  v0.3.0 brought multi-file modules; v0.3.1 added cross-module type refs and struct literals; v0.3.2 opened `==`/`!=` to user types; v0.3.3 added the `to_str(v)` builtin; v0.3.4 closed `s.replace` in native; v0.3.5 added `vec.reverse()` + `vec.clear()` in native; v0.3.6 introduced `s.repeat(n)` on both backends; v0.3.7 adds `s.find(needle) -> Opt[int]` on both backends — the second dual-backend method since the v0.3.x line started, exercising the v0.2.1 `Opt` machinery.  97/97 integration tests green; **43/45 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  No re-exports, no `import *`, no privacy.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -136,7 +136,7 @@ fn main():
 9. **traits for behaviour, structs for data.** no inheritance.
 10. **native backend + monomorphized generics** → target: within 10% of zig.
 
-## what works today (v0.3.6)
+## what works today (v0.3.7)
 
 ### interpreter
 
@@ -145,7 +145,7 @@ fn main():
 - arithmetic, comparison, boolean ops, `**`, `%`
 - structs + methods, enums + `match`, traits + `impl T for U` (incl. default methods)
 - `vec[T]` literals, `map[K, V]` literals + methods (`.len`, `.has`, `.get`, `.set`, `.keys`, `.values`, `.contains`, `.remove`, `.clear`)
-- string runtime: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.to_upper`, `.to_lower`, `.trim`, `.split`, `.replace`, `.repeat`
+- string runtime: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.to_upper`, `.to_lower`, `.trim`, `.split`, `.replace`, `.repeat`, `.find`
 - f-strings: `f"x={x}, y={point.x + 1}"`
 - error types: `T ! E`, `?` propagation, `raise`, `ok(v)` / `err(e)`
 - io builtins for files/argv
@@ -162,7 +162,7 @@ shells out to `cc` to produce a native binary. supported today:
 - enums with payloads + `match` + auto-debug `print(shape)`
 - `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `.push`, `.pop`, `.set`, `.contains`, `.clear`, `.reverse`, `for`-iteration (owning, heap-backed)
 - `map[str, i64]` empty literals + `.len`, `.has`, `.get`, `.set`, `.keys`
-- string ops: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.split`, `.trim`, `.to_upper`, `.to_lower`, `.replace`, `.repeat`
+- string ops: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.split`, `.trim`, `.to_upper`, `.to_lower`, `.replace`, `.repeat`, `.find`
 - f-strings (allocated via 2-pass `vsnprintf`)
 - positional + keyword args, default-aware static dispatch
 
@@ -231,6 +231,7 @@ native-capable:
 [`str_replace_native`](compiler/examples/str_replace_native.lingo) ·
 [`vec_reverse_native`](compiler/examples/vec_reverse_native.lingo) ·
 [`str_repeat_native`](compiler/examples/str_repeat_native.lingo) ·
+[`str_find_native`](compiler/examples/str_find_native.lingo) ·
 [`parse_port`](compiler/examples/parse_port.lingo)
 
 interp-only (waiting on `?`/`!E` lowering, trait vtables, or `T!E` lowering):

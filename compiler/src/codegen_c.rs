@@ -1372,6 +1372,7 @@ impl Codegen {
                             (CType::Str, "to_lower") => Some(CType::Str),
                             (CType::Str, "replace") => Some(CType::Str),
                             (CType::Str, "repeat") => Some(CType::Str),
+                            (CType::Str, "find") => Some(CType::Opt(Box::new(CType::I64))),
                             (CType::Str, "len") => Some(CType::I64),
                             (CType::Str, "split") => Some(CType::Vec(Box::new(CType::Str))),
                             (CType::Str, "concat") => Some(CType::Str),
@@ -3404,10 +3405,32 @@ impl Codegen {
                     CType::Str,
                 ))
             }
+            ("find", 1) => {
+                // v0.3.7: `s.find(needle) -> Opt[int]`.  Lowers to a stmt-
+                // expr that calls `strstr`: `NULL` becomes `none`, a hit
+                // is wrapped as `some(<byte offset>)`.  Empty needle still
+                // returns `some(0)` (Rust's `str::find("")` semantics).
+                // Reusing `lingo_opt_i64_t` (registered unconditionally
+                // since v0.2.1) — no extra typedef needed.
+                let needle = arg_str(self, 0)?;
+                self.opt_types.insert("i64".to_string());
+                let n = self.tmp_counter;
+                self.tmp_counter += 1;
+                let code = format!(
+                    "({{ const char* __fs_s_{n} = ({recv}); \
+                       const char* __fs_n_{n} = ({needle}); \
+                       const char* __fs_p_{n} = strstr(__fs_s_{n}, __fs_n_{n}); \
+                       __fs_p_{n} \
+                           ? (lingo_opt_i64_t){{ .is_some = true, .val = (int64_t)(__fs_p_{n} - __fs_s_{n}) }} \
+                           : (lingo_opt_i64_t){{ .is_some = false, .val = 0 }}; }})",
+                    recv = recv_code, needle = needle, n = n,
+                );
+                Ok((code, CType::Opt(Box::new(CType::I64))))
+            }
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `str.{}` with {} arg(s) is not supported yet \
-                         (have: len/0, contains/1, starts_with/1, ends_with/1, to_upper/0, to_lower/0, trim/0, split/1, replace/2, repeat/1)", m, n),
+                         (have: len/0, contains/1, starts_with/1, ends_with/1, to_upper/0, to_lower/0, trim/0, split/1, replace/2, repeat/1, find/1)", m, n),
                 span,
             )),
         }

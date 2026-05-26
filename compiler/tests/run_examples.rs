@@ -625,6 +625,28 @@ fn c_backend_str_repeat_native_matches_interp() {
 /// Negative `n` to `str.repeat` should be a runtime error (interp + native).
 /// We only check the native side here because the interp test would
 /// `assert_ne!(code, 0)` — same shape, less interesting.
+/// v0.3.7: `s.find(needle) -> Opt[int]` — first byte position of
+/// `needle` in `s`, or `none`.  Returns Opt to put the missing case
+/// in the type, exercising the v0.2.1 Opt machinery.
+#[test]
+fn str_find_interp() {
+    let (out, _stderr, code) = run("str_find_native.lingo");
+    assert_eq!(code, 0);
+    // Spot-checks for the canonical positions.
+    assert!(out.contains("o in hello: some(4)"), "missing o-at-4:\n{out}");
+    assert!(out.contains("world: some(7)"), "missing world-at-7:\n{out}");
+    assert!(out.contains("xyz: none"), "missing none arm:\n{out}");
+    assert!(out.contains("empty needle: some(0)"), "missing empty-needle:\n{out}");
+}
+
+#[test]
+fn c_backend_str_find_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("str_find_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("str_find_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
 #[test]
 fn c_backend_str_repeat_negative_runtime_error() {
     if which_cc().is_none() { return; }
