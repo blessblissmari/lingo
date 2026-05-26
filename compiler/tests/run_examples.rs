@@ -499,6 +499,64 @@ fn c_backend_str_methods_native_matches_interp() {
     assert_eq!(native_out, interp_out);
 }
 
+/// v0.3.4: `s.replace(from, to)` lands in the C backend.  The interp
+/// has had it since v0.1; this test pins byte-for-byte parity.
+#[test]
+fn str_replace_interp() {
+    let (out, _stderr, code) = run("str_replace_native.lingo");
+    assert_eq!(code, 0);
+    // Sanity-check a few specific lines so a future regression in the
+    // interp itself (not just the C backend) is loud.
+    assert!(out.contains("hell0, w0rld"), "missing literal substitution:\n{out}");
+    assert!(out.contains("the_quick_brown_fox"), "missing space->underscore:\n{out}");
+    assert!(out.contains("a -> b -> c -> d"), "missing growing replacement:\n{out}");
+    assert!(out.contains("xxxx"), "missing shrinking replacement:\n{out}");
+}
+
+#[test]
+fn c_backend_str_replace_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("str_replace_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("str_replace_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+/// v0.3.4: empty `from` is rejected at runtime in the C backend (the
+/// interp delegates to Rust's codepoint-aware `String::replace` there,
+/// which we can't replicate bytewise without a real UTF-8 decoder).
+/// We pin the diagnostic so a future native impl can't silently change
+/// the contract.
+#[test]
+fn c_backend_str_replace_empty_from_runtime_error() {
+    let project_root = std::env::current_dir().expect("cwd");
+    let path = std::env::temp_dir().join("lingo_replace_empty_from.lingo");
+    std::fs::write(
+        &path,
+        "fn main():\n    let s = \"abc\"\n    print(s.replace(\"\", \"X\"))\n",
+    )
+    .unwrap();
+    if which_cc().is_none() { return; }
+    let work_dir = std::env::temp_dir().join("lingo_replace_empty_from_build");
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir).expect("scratch dir");
+    let build = Command::new(cargo_bin())
+        .current_dir(&work_dir)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("failed to invoke lingo build");
+    assert!(build.status.success(), "build failed: {}", String::from_utf8_lossy(&build.stderr));
+    let bin = work_dir.join(path.file_stem().unwrap());
+    let run = Command::new(&bin).current_dir(&work_dir).output().expect("run native");
+    let _ = project_root;
+    assert!(!run.status.success(), "native should reject empty `from` at runtime");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("str.replace: empty `from`"),
+        "expected diagnostic about empty `from`, got:\n{stderr}"
+    );
+}
+
 #[test]
 fn c_backend_greet_native_matches_interp() {
     // f-string interpolation of struct values is the v0.1.22 unlock.

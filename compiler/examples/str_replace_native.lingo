@@ -1,0 +1,16 @@
+# v0.3.4: str.replace(from, to) in native.
+# Substitutes every non-overlapping occurrence of `from` with `to`.
+# Rejects empty `from` at runtime — pass a real separator.
+
+fn main():
+    let s = "hello, world"
+    print(s.replace("o", "0"))
+    print(s.replace("l", ""))
+    print(s.replace("xyz", "!!!"))
+    print("the quick brown fox".replace(" ", "_"))
+    # chained: first lowercase, then substitute.
+    print("Hello, World".to_lower().replace("world", "lingo"))
+    # longer replacement: input grows.
+    print("a.b.c.d".replace(".", " -> "))
+    # shorter replacement: input shrinks.
+    print("xxxxxxxx".replace("xx", "x"))

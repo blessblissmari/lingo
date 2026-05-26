@@ -200,6 +200,38 @@ programs aren't forced to live in one `.lingo` file.
   new example, the failures are the same two preexisting non-
   matchers — neither involves `to_str`).  clippy 0 warnings.
 
+- [x] **`s.replace(from, to)` in native (v0.3.4)**:
+  closes the last common-string-method gap between interp and
+  the C backend.  the interp has had `replace` since v0.1; the
+  C backend now lowers `s.replace(from, to)` to a new
+  `lingo_str_replace` runtime helper next to `lingo_str_split`.
+  two-pass: first counts non-overlapping occurrences of `from`
+  in `s`, then allocates exactly `s_len + count*(to_len -
+  from_len) + 1` bytes and copies + substitutes in one sweep.
+  matches Rust's `str::replace` byte-for-byte for non-empty
+  `from` on ASCII (and on UTF-8 too, when `from` itself is
+  valid UTF-8 — the substitution happens at codepoint-aligned
+  positions).  empty `from` is rejected at runtime — the
+  interp delegates to Rust's codepoint-aware behaviour there
+  and we can't replicate it bytewise without a real UTF-8
+  decoder; the diagnostic mirrors `lingo_str_split`'s
+  empty-separator one (`str.replace: empty `from` not supported
+  yet`).  `gen_str_method` gained the `("replace", 2)` arm and
+  the empty-vec back-inference table gained the `(Str,
+  "replace") -> Str` row so `let mut acc = vec[]` followed by
+  `acc.push(s.replace(...))` infers the element type
+  correctly.  no AST / parser / interp changes — pure C
+  backend work.  new example `str_replace_native.lingo`
+  (literal sub, multi-occurrence remove, no-match identity,
+  space → underscore, `to_lower` chained with `replace`,
+  growing replacement, shrinking replacement).  3 new tests
+  (`str_replace_interp`, `c_backend_str_replace_native_matches_interp`,
+  `c_backend_str_replace_empty_from_runtime_error`).  **89/89
+  green** (was 86/86).  audit **40/42** byte-identical interp
+  ≡ native (the +1 is the new example, the 2 skips are still
+  the preexisting interactive `io_roundtrip` +
+  `fib_native_bench`).  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers

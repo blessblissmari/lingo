@@ -1356,6 +1356,7 @@ impl Codegen {
                             (CType::Str, "trim") => Some(CType::Str),
                             (CType::Str, "to_upper") => Some(CType::Str),
                             (CType::Str, "to_lower") => Some(CType::Str),
+                            (CType::Str, "replace") => Some(CType::Str),
                             (CType::Str, "len") => Some(CType::I64),
                             (CType::Str, "split") => Some(CType::Vec(Box::new(CType::Str))),
                             (CType::Str, "concat") => Some(CType::Str),
@@ -3353,6 +3354,17 @@ impl Codegen {
                     CType::Vec(Box::new(CType::Str)),
                 ))
             }
+            ("replace", 2) => {
+                // `s.replace(from, to)` returns a fresh str with every
+                // non-overlapping occurrence of `from` substituted by `to`.
+                // Empty `from` is rejected at runtime — see helper comment.
+                let from = arg_str(self, 0)?;
+                let to = arg_str(self, 1)?;
+                Ok((
+                    format!("lingo_str_replace({}, {}, {})", recv_code, from, to),
+                    CType::Str,
+                ))
+            }
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `str.{}` with {} arg(s) is not supported yet \
@@ -4075,6 +4087,60 @@ static const char* lingo_str_to_lower(const char* s) {
         out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
     }
     out[n] = '\\0';
+    return out;
+}
+
+/* Replace every non-overlapping occurrence of non-empty `from` in `s` with
+ * `to`.  Two passes: first counts, second copies.  Returns a freshly malloc'd
+ * NUL-terminated string.  Matches Rust's `str::replace` for non-empty `from`
+ * on ASCII (and on UTF-8 too, since `from` is matched bytewise and replacement
+ * happens at codepoint-aligned positions whenever `from` itself is valid
+ * UTF-8).  Empty `from` is rejected — the interpreter delegates to Rust's
+ * codepoint-aware behaviour there, which we can't replicate bytewise without
+ * a UTF-8 decoder; v0.4 brings real UTF-8 plumbing. */
+__attribute__((unused))
+static const char* lingo_str_replace(const char* s, const char* from, const char* to) {
+    size_t from_len = strlen(from);
+    if (from_len == 0) {
+        fprintf(stderr, \"lingo: str.replace: empty `from` not supported yet\\n\");
+        exit(1);
+    }
+    size_t s_len = strlen(s);
+    size_t to_len = strlen(to);
+    /* pass 1: count non-overlapping occurrences of `from` in `s`. */
+    size_t count = 0;
+    {
+        const char* p = s;
+        while ((p = strstr(p, from)) != NULL) { count++; p += from_len; }
+    }
+    if (count == 0) {
+        char* out = (char*)malloc(s_len + 1);
+        if (!out) { fprintf(stderr, \"lingo: oom in str_replace\\n\"); exit(1); }
+        memcpy(out, s, s_len + 1);
+        return out;
+    }
+    /* pass 2: alloc exact size, then copy + substitute. */
+    size_t out_len = s_len + count * to_len - count * from_len;
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in str_replace\\n\"); exit(1); }
+    char* w = out;
+    const char* r = s;
+    while (1) {
+        const char* hit = strstr(r, from);
+        if (!hit) {
+            size_t tail = strlen(r);
+            memcpy(w, r, tail);
+            w += tail;
+            break;
+        }
+        size_t pre = (size_t)(hit - r);
+        memcpy(w, r, pre);
+        w += pre;
+        memcpy(w, to, to_len);
+        w += to_len;
+        r = hit + from_len;
+    }
+    *w = '\\0';
     return out;
 }
 
