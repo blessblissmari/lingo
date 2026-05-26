@@ -220,6 +220,20 @@ fn emit_user_vec_runtime(out: &mut String, type_name: &str) {
                        fprintf(stderr, \"lingo: vec.set OOB\\n\"); exit(1); \
                    }} \
                    v->data[i] = x; \
+                   }}",
+             n = type_name, v = v).unwrap();
+    // v0.3.5: in-place clear (preserves capacity) and reverse for user vecs.
+    // `clear` just resets `len`; the existing `data`/`cap` stay live so the
+    // next `push` reuses the buffer.  `reverse` swaps in pairs (size_t loop
+    // bound `len/2` to stop at the midpoint, naturally a no-op when len<2).
+    writeln!(out, "__attribute__((unused)) static void lingo_vec_{n}_clear({v}* v) {{ \
+                   v->len = 0; \
+                   }}",
+             n = type_name, v = v).unwrap();
+    writeln!(out, "__attribute__((unused)) static void lingo_vec_{n}_reverse({v}* v) {{ \
+                   for (int64_t __i = 0, __j = v->len - 1; __i < __j; ++__i, --__j) {{ \
+                       {n} __t = v->data[__i]; v->data[__i] = v->data[__j]; v->data[__j] = __t; \
+                   }} \
                    }}\n",
              n = type_name, v = v).unwrap();
 }
@@ -1356,6 +1370,9 @@ impl Codegen {
                             (CType::Str, "trim") => Some(CType::Str),
                             (CType::Str, "to_upper") => Some(CType::Str),
                             (CType::Str, "to_lower") => Some(CType::Str),
+                            (CType::Str, "replace") => Some(CType::Str),
+                            (CType::Str, "repeat") => Some(CType::Str),
+                            (CType::Str, "find") => Some(CType::Opt(Box::new(CType::I64))),
                             (CType::Str, "len") => Some(CType::I64),
                             (CType::Str, "split") => Some(CType::Vec(Box::new(CType::Str))),
                             (CType::Str, "concat") => Some(CType::Str),
@@ -3353,10 +3370,67 @@ impl Codegen {
                     CType::Vec(Box::new(CType::Str)),
                 ))
             }
+            ("replace", 2) => {
+                // `s.replace(from, to)` returns a fresh str with every
+                // non-overlapping occurrence of `from` substituted by `to`.
+                // Empty `from` is rejected at runtime — see helper comment.
+                let from = arg_str(self, 0)?;
+                let to = arg_str(self, 1)?;
+                Ok((
+                    format!("lingo_str_replace({}, {}, {})", recv_code, from, to),
+                    CType::Str,
+                ))
+            }
+            ("repeat", 1) => {
+                // v0.3.6: `s.repeat(n)` — `n` must be `int`.  Negative `n`
+                // is a runtime error (matches the interp's contract).
+                let a = &args[0];
+                if a.name.is_some() {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        "C backend: `str.repeat` takes a positional int",
+                        a.span,
+                    ));
+                }
+                let (c, t) = self.gen_expr(&a.value)?;
+                if t != CType::I64 {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `str.repeat` count must be int, got `{}`", t.c_decl()),
+                        a.span,
+                    ));
+                }
+                Ok((
+                    format!("lingo_str_repeat({}, {})", recv_code, c),
+                    CType::Str,
+                ))
+            }
+            ("find", 1) => {
+                // v0.3.7: `s.find(needle) -> Opt[int]`.  Lowers to a stmt-
+                // expr that calls `strstr`: `NULL` becomes `none`, a hit
+                // is wrapped as `some(<byte offset>)`.  Empty needle still
+                // returns `some(0)` (Rust's `str::find("")` semantics).
+                // Reusing `lingo_opt_i64_t` (registered unconditionally
+                // since v0.2.1) — no extra typedef needed.
+                let needle = arg_str(self, 0)?;
+                self.opt_types.insert("i64".to_string());
+                let n = self.tmp_counter;
+                self.tmp_counter += 1;
+                let code = format!(
+                    "({{ const char* __fs_s_{n} = ({recv}); \
+                       const char* __fs_n_{n} = ({needle}); \
+                       const char* __fs_p_{n} = strstr(__fs_s_{n}, __fs_n_{n}); \
+                       __fs_p_{n} \
+                           ? (lingo_opt_i64_t){{ .is_some = true, .val = (int64_t)(__fs_p_{n} - __fs_s_{n}) }} \
+                           : (lingo_opt_i64_t){{ .is_some = false, .val = 0 }}; }})",
+                    recv = recv_code, needle = needle, n = n,
+                );
+                Ok((code, CType::Opt(Box::new(CType::I64))))
+            }
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `str.{}` with {} arg(s) is not supported yet \
-                         (have: len/0, contains/1, starts_with/1, ends_with/1)", m, n),
+                         (have: len/0, contains/1, starts_with/1, ends_with/1, to_upper/0, to_lower/0, trim/0, split/1, replace/2, repeat/1, find/1)", m, n),
                 span,
             )),
         }
@@ -3611,6 +3685,30 @@ impl Codegen {
                 ))?;
                 Ok((format!("lingo_vec_{}_pop(&{})", elem_suffix, ident), elem_ty))
             }
+            // v0.3.5: clear/reverse — both mutating, both require an
+            // addressable lvalue receiver (same restriction as push/pop/set).
+            // `clear()` keeps the backing buffer for reuse on the next push;
+            // `reverse()` is in-place via pairwise swaps.
+            ("clear", 0) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.clear` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                writeln!(self.body, "{}lingo_vec_{}_clear(&{});",
+                         self.pad(), elem_suffix, ident).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
+            ("reverse", 0) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.reverse` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                writeln!(self.body, "{}lingo_vec_{}_reverse(&{});",
+                         self.pad(), elem_suffix, ident).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
             ("set", 2) => {
                 let ident = recv_ident.ok_or_else(|| LingoError::new(
                     Stage::Resolve,
@@ -3648,7 +3746,7 @@ impl Codegen {
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `vec.{}` with {} arg(s) is not supported yet \
-                         (have: len/0, get/1, push/1, pop/0, set/2)", m, n),
+                         (have: len/0, get/1, push/1, pop/0, set/2, contains/1, clear/0, reverse/0)", m, n),
                 span,
             )),
         }
@@ -4078,6 +4176,96 @@ static const char* lingo_str_to_lower(const char* s) {
     return out;
 }
 
+/* Repeat `s` `n` times into a fresh malloc'd buffer (v0.3.6).  Matches
+ * Rust's `str::repeat` for non-negative `n`; negative `n` is rejected at
+ * runtime with a clear message (the Rust impl panics on usize overflow,
+ * we surface the contract earlier).  Single allocation sized to exactly
+ * `n*s_len + 1` bytes; copies in a tight loop.  `n == 0` returns empty. */
+__attribute__((unused))
+static const char* lingo_str_repeat(const char* s, int64_t n) {
+    if (n < 0) {
+        fprintf(stderr, \"lingo: str.repeat: count must be non-negative, got %\" PRId64 \"\\n\", n);
+        exit(1);
+    }
+    if (n == 0) {
+        char* out = (char*)malloc(1);
+        if (!out) { fprintf(stderr, \"lingo: oom in str_repeat\\n\"); exit(1); }
+        out[0] = '\\0';
+        return out;
+    }
+    size_t s_len = strlen(s);
+    /* overflow check: if n*s_len overflows size_t we'd write past the
+     * allocation.  Use a divide instead of multiply to detect early. */
+    if (s_len != 0 && (size_t)n > (SIZE_MAX - 1) / s_len) {
+        fprintf(stderr, \"lingo: str.repeat: result too large\\n\");
+        exit(1);
+    }
+    size_t total = (size_t)n * s_len;
+    char* out = (char*)malloc(total + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in str_repeat\\n\"); exit(1); }
+    char* p = out;
+    for (int64_t i = 0; i < n; i++) {
+        memcpy(p, s, s_len);
+        p += s_len;
+    }
+    *p = '\\0';
+    return out;
+}
+
+/* Replace every non-overlapping occurrence of non-empty `from` in `s` with
+ * `to`.  Two passes: first counts, second copies.  Returns a freshly malloc'd
+ * NUL-terminated string.  Matches Rust's `str::replace` for non-empty `from`
+ * on ASCII (and on UTF-8 too, since `from` is matched bytewise and replacement
+ * happens at codepoint-aligned positions whenever `from` itself is valid
+ * UTF-8).  Empty `from` is rejected — the interpreter delegates to Rust's
+ * codepoint-aware behaviour there, which we can't replicate bytewise without
+ * a UTF-8 decoder; v0.4 brings real UTF-8 plumbing. */
+__attribute__((unused))
+static const char* lingo_str_replace(const char* s, const char* from, const char* to) {
+    size_t from_len = strlen(from);
+    if (from_len == 0) {
+        fprintf(stderr, \"lingo: str.replace: empty `from` not supported yet\\n\");
+        exit(1);
+    }
+    size_t s_len = strlen(s);
+    size_t to_len = strlen(to);
+    /* pass 1: count non-overlapping occurrences of `from` in `s`. */
+    size_t count = 0;
+    {
+        const char* p = s;
+        while ((p = strstr(p, from)) != NULL) { count++; p += from_len; }
+    }
+    if (count == 0) {
+        char* out = (char*)malloc(s_len + 1);
+        if (!out) { fprintf(stderr, \"lingo: oom in str_replace\\n\"); exit(1); }
+        memcpy(out, s, s_len + 1);
+        return out;
+    }
+    /* pass 2: alloc exact size, then copy + substitute. */
+    size_t out_len = s_len + count * to_len - count * from_len;
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) { fprintf(stderr, \"lingo: oom in str_replace\\n\"); exit(1); }
+    char* w = out;
+    const char* r = s;
+    while (1) {
+        const char* hit = strstr(r, from);
+        if (!hit) {
+            size_t tail = strlen(r);
+            memcpy(w, r, tail);
+            w += tail;
+            break;
+        }
+        size_t pre = (size_t)(hit - r);
+        memcpy(w, r, pre);
+        w += pre;
+        memcpy(w, to, to_len);
+        w += to_len;
+        r = hit + from_len;
+    }
+    *w = '\\0';
+    return out;
+}
+
 /* Split `s` by non-empty `sep` and return a `lingo_vec_str_t` of malloc'd
  * pieces.  Two passes: first counts, second copies.  Empty `sep` is rejected
  * (interp splits by codepoint there; we'll add that once we have UTF-8). */
@@ -4457,6 +4645,37 @@ static void lingo_vec_str_set(lingo_vec_str_t* v, int64_t i, const char* x) {
         exit(1);
     }
     v->data[i] = x;
+}
+
+/* === vec clear / reverse (v0.3.5) ===
+ * Mutating, in-place, no allocations.  `clear` keeps the backing buffer
+ * (`data`/`cap` survive) so the next `push` reuses the slab — matches the
+ * interp's `Vec::clear` semantics.  `reverse` swaps in pairs from both
+ * ends; the loop bound naturally handles len < 2 as a no-op.
+ */
+__attribute__((unused))
+static void lingo_vec_i64_clear(lingo_vec_i64_t* v) { v->len = 0; }
+__attribute__((unused))
+static void lingo_vec_i64_reverse(lingo_vec_i64_t* v) {
+    for (int64_t i = 0, j = v->len - 1; i < j; ++i, --j) {
+        int64_t t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t;
+    }
+}
+__attribute__((unused))
+static void lingo_vec_f64_clear(lingo_vec_f64_t* v) { v->len = 0; }
+__attribute__((unused))
+static void lingo_vec_f64_reverse(lingo_vec_f64_t* v) {
+    for (int64_t i = 0, j = v->len - 1; i < j; ++i, --j) {
+        double t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t;
+    }
+}
+__attribute__((unused))
+static void lingo_vec_str_clear(lingo_vec_str_t* v) { v->len = 0; }
+__attribute__((unused))
+static void lingo_vec_str_reverse(lingo_vec_str_t* v) {
+    for (int64_t i = 0, j = v->len - 1; i < j; ++i, --j) {
+        const char* t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t;
+    }
 }
 
 /* === show runtime (v0.3.3) ===

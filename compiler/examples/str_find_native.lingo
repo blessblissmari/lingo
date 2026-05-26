@@ -1,0 +1,50 @@
+# v0.3.7: s.find(needle) -> Opt[int].
+# Returns the byte position of the first occurrence of `needle` in `s`,
+# or `none` if the needle is not present.
+
+fn main():
+    let s = "hello, world"
+
+    match s.find("o"):
+        some(i):
+            print(f"o in hello: some({i})")
+        none:
+            print("o in hello: none")
+
+    match s.find("world"):
+        some(i):
+            print(f"world: some({i})")
+        none:
+            print("world: none")
+
+    match s.find("xyz"):
+        some(_):
+            print("xyz: some(?)")
+        none:
+            print("xyz: none")
+
+    match s.find("h"):
+        some(i):
+            print(f"first byte: some({i})")
+        none:
+            print("first byte: none")
+
+    match s.find("ld"):
+        some(i):
+            print(f"last bytes: some({i})")
+        none:
+            print("last bytes: none")
+
+    # empty needle returns some(0) — matches Rust's str::find("")
+    match s.find(""):
+        some(i):
+            print(f"empty needle: some({i})")
+        none:
+            print("empty needle: none")
+
+    # use the index for control flow.
+    match s.find(", "):
+        some(p):
+            print(f"comma+space at byte {p}")
+        none:
+            print("no comma")
