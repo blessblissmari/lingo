@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.3.4 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  **Modules (v0.3.0):** `import foo` reads `foo.lingo`; `import foo.bar` reads `foo/bar.lingo`; `import foo as f` renames the alias.  The alias is the only way to reach another module's top-level names — `f.fn()`, `f.CONST`, `f.MyEnum.Variant`.  Cycle / duplicate-alias / missing-target diagnostics are mandatory.  **Cross-module types (v0.3.1):** `fn f() -> bar.Point`, `let p: bar.Point = ...`, `vec[bar.Point]`, and `bar.Point{x: 1, y: 2}` all work — the resolver rewrites every dotted reference to a flat ident before the interp / C backend runs, so both backends keep working on one flat program.  Parser limit: one module hop (`a.b.C` rejected).  Unknown alias is a clean resolver-time error.  **Structural eq (v0.3.2):** `==` and `!=` now work field-wise on structs, tag+payload-wise on enums, and element-wise on `vec[T]`, recursing through nested compound types.  `Map`/`Result`/`Opt` deliberately stay non-`==`-able — error at the call site, not at the helper.  **`to_str(v) -> str` (v0.3.3):** builtin stringifier in the same display shape as `print`; intercepted by name (not a keyword), so user `to_str` methods on traits keep working.  **`s.replace(from, to)` in native (v0.3.4):** closes the last common-string-method gap between interp and C backend; non-empty `from` only (empty `from` is a runtime error — the interp's codepoint-aware behaviour there isn't byte-faithful).  89/89 integration tests green; **40/42 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  No re-exports, no `import *`, no privacy.
+> ⚠️ **status:** v0.3.5 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  **Modules (v0.3.0):** `import foo` reads `foo.lingo`; `import foo.bar` reads `foo/bar.lingo`; `import foo as f` renames the alias.  The alias is the only way to reach another module's top-level names — `f.fn()`, `f.CONST`, `f.MyEnum.Variant`.  Cycle / duplicate-alias / missing-target diagnostics are mandatory.  **Cross-module types (v0.3.1):** `fn f() -> bar.Point`, `let p: bar.Point = ...`, `vec[bar.Point]`, and `bar.Point{x: 1, y: 2}` all work — the resolver rewrites every dotted reference to a flat ident before the interp / C backend runs, so both backends keep working on one flat program.  Parser limit: one module hop (`a.b.C` rejected).  Unknown alias is a clean resolver-time error.  **Structural eq (v0.3.2):** `==` and `!=` now work field-wise on structs, tag+payload-wise on enums, and element-wise on `vec[T]`, recursing through nested compound types.  `Map`/`Result`/`Opt` deliberately stay non-`==`-able — error at the call site, not at the helper.  **`to_str(v) -> str` (v0.3.3):** builtin stringifier in the same display shape as `print`; intercepted by name (not a keyword), so user `to_str` methods on traits keep working.  **`s.replace(from, to)` in native (v0.3.4):** closes the last common-string-method gap between interp and C backend; non-empty `from` only (empty `from` is a runtime error — the interp's codepoint-aware behaviour there isn't byte-faithful).  **`vec.reverse()` + `vec.clear()` in native (v0.3.5):** both mutating and in-place; receiver must be a plain variable.  `clear` keeps the backing buffer alive (matches interp `Vec::clear`) so `push` after `clear` reuses the slab.  92/92 integration tests green; **41/43 applicable examples** byte-identical interp ≡ native (two skipped are interactive `io_roundtrip` + `fib_native_bench`).  clippy 0 warnings.  No re-exports, no `import *`, no privacy.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -136,7 +136,7 @@ fn main():
 9. **traits for behaviour, structs for data.** no inheritance.
 10. **native backend + monomorphized generics** → target: within 10% of zig.
 
-## what works today (v0.3.4)
+## what works today (v0.3.5)
 
 ### interpreter
 
@@ -160,7 +160,7 @@ shells out to `cc` to produce a native binary. supported today:
 - `fn`, control flow, recursion
 - structs with fields + methods (static and instance), auto-debug `print(point)`
 - enums with payloads + `match` + auto-debug `print(shape)`
-- `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `.push`, `.pop`, `.set`, `for`-iteration (owning, heap-backed)
+- `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `.push`, `.pop`, `.set`, `.contains`, `.clear`, `.reverse`, `for`-iteration (owning, heap-backed)
 - `map[str, i64]` empty literals + `.len`, `.has`, `.get`, `.set`, `.keys`
 - string ops: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.split`, `.trim`, `.to_upper`, `.to_lower`, `.replace`
 - f-strings (allocated via 2-pass `vsnprintf`)
@@ -201,6 +201,13 @@ sized to the exact output length.  Non-empty `from` only (empty
 `from` is a runtime error in native; use a real separator).
 [`str_replace_native`](compiler/examples/str_replace_native.lingo)
 
+**`vec.reverse()` + `vec.clear()` in native (v0.3.5)** — both
+mutating and in-place; receiver must be a plain variable (same
+restriction as `push`/`pop`/`set`).  `clear` keeps the backing
+buffer alive so a `push` after `clear` reuses the slab — matches
+interp `Vec::clear`.
+[`vec_reverse_native`](compiler/examples/vec_reverse_native.lingo)
+
 native-capable:
 [`hello`](compiler/examples/hello.lingo) ·
 [`forever`](compiler/examples/forever.lingo) ·
@@ -222,6 +229,7 @@ native-capable:
 [`vec_user_types_native`](compiler/examples/vec_user_types_native.lingo) ·
 [`str_chars_native`](compiler/examples/str_chars_native.lingo) ·
 [`str_replace_native`](compiler/examples/str_replace_native.lingo) ·
+[`vec_reverse_native`](compiler/examples/vec_reverse_native.lingo) ·
 [`parse_port`](compiler/examples/parse_port.lingo)
 
 interp-only (waiting on `?`/`!E` lowering, trait vtables, or `T!E` lowering):

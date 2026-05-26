@@ -220,6 +220,20 @@ fn emit_user_vec_runtime(out: &mut String, type_name: &str) {
                        fprintf(stderr, \"lingo: vec.set OOB\\n\"); exit(1); \
                    }} \
                    v->data[i] = x; \
+                   }}",
+             n = type_name, v = v).unwrap();
+    // v0.3.5: in-place clear (preserves capacity) and reverse for user vecs.
+    // `clear` just resets `len`; the existing `data`/`cap` stay live so the
+    // next `push` reuses the buffer.  `reverse` swaps in pairs (size_t loop
+    // bound `len/2` to stop at the midpoint, naturally a no-op when len<2).
+    writeln!(out, "__attribute__((unused)) static void lingo_vec_{n}_clear({v}* v) {{ \
+                   v->len = 0; \
+                   }}",
+             n = type_name, v = v).unwrap();
+    writeln!(out, "__attribute__((unused)) static void lingo_vec_{n}_reverse({v}* v) {{ \
+                   for (int64_t __i = 0, __j = v->len - 1; __i < __j; ++__i, --__j) {{ \
+                       {n} __t = v->data[__i]; v->data[__i] = v->data[__j]; v->data[__j] = __t; \
+                   }} \
                    }}\n",
              n = type_name, v = v).unwrap();
 }
@@ -3623,6 +3637,30 @@ impl Codegen {
                 ))?;
                 Ok((format!("lingo_vec_{}_pop(&{})", elem_suffix, ident), elem_ty))
             }
+            // v0.3.5: clear/reverse — both mutating, both require an
+            // addressable lvalue receiver (same restriction as push/pop/set).
+            // `clear()` keeps the backing buffer for reuse on the next push;
+            // `reverse()` is in-place via pairwise swaps.
+            ("clear", 0) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.clear` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                writeln!(self.body, "{}lingo_vec_{}_clear(&{});",
+                         self.pad(), elem_suffix, ident).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
+            ("reverse", 0) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.reverse` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                writeln!(self.body, "{}lingo_vec_{}_reverse(&{});",
+                         self.pad(), elem_suffix, ident).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
             ("set", 2) => {
                 let ident = recv_ident.ok_or_else(|| LingoError::new(
                     Stage::Resolve,
@@ -3660,7 +3698,7 @@ impl Codegen {
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `vec.{}` with {} arg(s) is not supported yet \
-                         (have: len/0, get/1, push/1, pop/0, set/2)", m, n),
+                         (have: len/0, get/1, push/1, pop/0, set/2, contains/1, clear/0, reverse/0)", m, n),
                 span,
             )),
         }
@@ -4523,6 +4561,37 @@ static void lingo_vec_str_set(lingo_vec_str_t* v, int64_t i, const char* x) {
         exit(1);
     }
     v->data[i] = x;
+}
+
+/* === vec clear / reverse (v0.3.5) ===
+ * Mutating, in-place, no allocations.  `clear` keeps the backing buffer
+ * (`data`/`cap` survive) so the next `push` reuses the slab — matches the
+ * interp's `Vec::clear` semantics.  `reverse` swaps in pairs from both
+ * ends; the loop bound naturally handles len < 2 as a no-op.
+ */
+__attribute__((unused))
+static void lingo_vec_i64_clear(lingo_vec_i64_t* v) { v->len = 0; }
+__attribute__((unused))
+static void lingo_vec_i64_reverse(lingo_vec_i64_t* v) {
+    for (int64_t i = 0, j = v->len - 1; i < j; ++i, --j) {
+        int64_t t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t;
+    }
+}
+__attribute__((unused))
+static void lingo_vec_f64_clear(lingo_vec_f64_t* v) { v->len = 0; }
+__attribute__((unused))
+static void lingo_vec_f64_reverse(lingo_vec_f64_t* v) {
+    for (int64_t i = 0, j = v->len - 1; i < j; ++i, --j) {
+        double t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t;
+    }
+}
+__attribute__((unused))
+static void lingo_vec_str_clear(lingo_vec_str_t* v) { v->len = 0; }
+__attribute__((unused))
+static void lingo_vec_str_reverse(lingo_vec_str_t* v) {
+    for (int64_t i = 0, j = v->len - 1; i < j; ++i, --j) {
+        const char* t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t;
+    }
 }
 
 /* === show runtime (v0.3.3) ===

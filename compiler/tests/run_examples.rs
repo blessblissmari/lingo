@@ -557,6 +557,50 @@ fn c_backend_str_replace_empty_from_runtime_error() {
     );
 }
 
+/// v0.3.5: `vec.reverse()` and `vec.clear()` land in the C backend.
+/// Both are mutating, receiver must be a plain ident — same restriction
+/// as `push`/`pop`/`set`.  `clear` keeps the backing buffer alive so the
+/// next `push` reuses it (matches interp `Vec::clear`).
+#[test]
+fn vec_reverse_clear_interp() {
+    let (out, _stderr, code) = run("vec_reverse_native.lingo");
+    assert_eq!(code, 0);
+    assert!(out.contains("vec[5, 4, 3, 2, 1]"), "missing i64 reverse:\n{out}");
+    assert!(out.contains("vec[fox, brown, quick, the]"), "missing str reverse:\n{out}");
+    assert!(out.contains("len before clear: 3"), "missing pre-clear len:\n{out}");
+    assert!(out.contains("len after clear: 0"), "missing post-clear len:\n{out}");
+    assert!(out.contains("vec[99, 100]"), "missing post-clear push:\n{out}");
+}
+
+#[test]
+fn c_backend_vec_reverse_clear_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("vec_reverse_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("vec_reverse_native.lingo");
+    assert_eq!(native_out, interp_out);
+}
+
+/// `vec.clear()` and `vec.reverse()` are mutating, so the receiver
+/// must be a plain variable — same restriction as `push`/`pop`/`set`.
+/// Calling them on a literal must produce a clear diagnostic.
+#[test]
+fn c_backend_vec_clear_rejects_literal_receiver() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_vec_clear_literal.lingo");
+    std::fs::write(
+        &path,
+        "fn main():\n    vec[1, 2, 3].clear()\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin).arg("build").arg(&path).output().expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject vec.clear on literal");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`vec.clear` receiver must be a plain variable"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
 #[test]
 fn c_backend_greet_native_matches_interp() {
     // f-string interpolation of struct values is the v0.1.22 unlock.

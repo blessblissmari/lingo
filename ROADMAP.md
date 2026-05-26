@@ -232,6 +232,31 @@ programs aren't forced to live in one `.lingo` file.
   the preexisting interactive `io_roundtrip` +
   `fib_native_bench`).  clippy 0 warnings.
 
+- [x] **`vec.reverse()` and `vec.clear()` in native (v0.3.5)**:
+  closes the next common-vec-method gap between interp and
+  the C backend.  both methods are mutating and in-place, so
+  the receiver must be a plain variable (same restriction as
+  `push`/`pop`/`set`).  `clear` keeps the backing buffer
+  alive — `data` and `cap` survive, only `len` resets to 0 —
+  so a `push` after `clear` reuses the slab without
+  reallocating, matching the interp's `Vec::clear` semantics.
+  `reverse` swaps in pairs from both ends with a single loop
+  bounded by `len/2`; `len < 2` is a natural no-op.  Both
+  helpers are emitted three times in the static prelude (one
+  per `i64`/`f64`/`str`) and once per user struct/enum via
+  `emit_user_vec_runtime`, so `vec[Point].reverse()` works
+  end-to-end alongside the primitives.  `gen_vec_method`
+  gained the `("clear", 0)` and `("reverse", 0)` arms next
+  to `pop` / `set`; the catch-all error string now lists the
+  full method set.  new example `vec_reverse_native.lingo`
+  (i64 reverse, str reverse, len-0/1 no-op smoke checks, clear
+  + push reuse, combined reverse-then-clear).  3 new tests
+  (`vec_reverse_clear_interp`,
+  `c_backend_vec_reverse_clear_native_matches_interp`,
+  `c_backend_vec_clear_rejects_literal_receiver`).  **92/92
+  green** (was 89/89).  audit **41/43** byte-identical (the
+  +1 is the new example).  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers
