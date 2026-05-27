@@ -1,0 +1,16 @@
+# v0.3.6: s.repeat(n) on both backends.
+# Returns a fresh string with `s` concatenated `n` times.
+# n == 0 returns ""; negative n is a runtime error.
+
+fn main():
+    print("ab".repeat(3))
+    print("=".repeat(20))
+    print("hi ".repeat(0))            # empty string, just newline
+    print(f"|{"x".repeat(0)}|")        # explicitly empty inside an f-string
+    print("z".repeat(1))               # single repeat is identity
+    print("a".repeat(5).len())         # len is bytes — 5 here
+    # chained: build a banner.
+    let bar = "-".repeat(10)
+    print(bar)
+    print(f"  {"hi".repeat(3)}  ")
+    print(bar)

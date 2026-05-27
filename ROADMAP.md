@@ -200,6 +200,146 @@ programs aren't forced to live in one `.lingo` file.
   new example, the failures are the same two preexisting non-
   matchers — neither involves `to_str`).  clippy 0 warnings.
 
+- [x] **`s.replace(from, to)` in native (v0.3.4)**:
+  closes the last common-string-method gap between interp and
+  the C backend.  the interp has had `replace` since v0.1; the
+  C backend now lowers `s.replace(from, to)` to a new
+  `lingo_str_replace` runtime helper next to `lingo_str_split`.
+  two-pass: first counts non-overlapping occurrences of `from`
+  in `s`, then allocates exactly `s_len + count*(to_len -
+  from_len) + 1` bytes and copies + substitutes in one sweep.
+  matches Rust's `str::replace` byte-for-byte for non-empty
+  `from` on ASCII (and on UTF-8 too, when `from` itself is
+  valid UTF-8 — the substitution happens at codepoint-aligned
+  positions).  empty `from` is rejected at runtime — the
+  interp delegates to Rust's codepoint-aware behaviour there
+  and we can't replicate it bytewise without a real UTF-8
+  decoder; the diagnostic mirrors `lingo_str_split`'s
+  empty-separator one (`str.replace: empty `from` not supported
+  yet`).  `gen_str_method` gained the `("replace", 2)` arm and
+  the empty-vec back-inference table gained the `(Str,
+  "replace") -> Str` row so `let mut acc = vec[]` followed by
+  `acc.push(s.replace(...))` infers the element type
+  correctly.  no AST / parser / interp changes — pure C
+  backend work.  new example `str_replace_native.lingo`
+  (literal sub, multi-occurrence remove, no-match identity,
+  space → underscore, `to_lower` chained with `replace`,
+  growing replacement, shrinking replacement).  3 new tests
+  (`str_replace_interp`, `c_backend_str_replace_native_matches_interp`,
+  `c_backend_str_replace_empty_from_runtime_error`).  **89/89
+  green** (was 86/86).  audit **40/42** byte-identical interp
+  ≡ native (the +1 is the new example, the 2 skips are still
+  the preexisting interactive `io_roundtrip` +
+  `fib_native_bench`).  clippy 0 warnings.
+
+- [x] **`vec.reverse()` and `vec.clear()` in native (v0.3.5)**:
+  closes the next common-vec-method gap between interp and
+  the C backend.  both methods are mutating and in-place, so
+  the receiver must be a plain variable (same restriction as
+  `push`/`pop`/`set`).  `clear` keeps the backing buffer
+  alive — `data` and `cap` survive, only `len` resets to 0 —
+  so a `push` after `clear` reuses the slab without
+  reallocating, matching the interp's `Vec::clear` semantics.
+  `reverse` swaps in pairs from both ends with a single loop
+  bounded by `len/2`; `len < 2` is a natural no-op.  Both
+  helpers are emitted three times in the static prelude (one
+  per `i64`/`f64`/`str`) and once per user struct/enum via
+  `emit_user_vec_runtime`, so `vec[Point].reverse()` works
+  end-to-end alongside the primitives.  `gen_vec_method`
+  gained the `("clear", 0)` and `("reverse", 0)` arms next
+  to `pop` / `set`; the catch-all error string now lists the
+  full method set.  new example `vec_reverse_native.lingo`
+  (i64 reverse, str reverse, len-0/1 no-op smoke checks, clear
+  + push reuse, combined reverse-then-clear).  3 new tests
+  (`vec_reverse_clear_interp`,
+  `c_backend_vec_reverse_clear_native_matches_interp`,
+  `c_backend_vec_clear_rejects_literal_receiver`).  **92/92
+  green** (was 89/89).  audit **41/43** byte-identical (the
+  +1 is the new example).  clippy 0 warnings.
+
+- [x] **`s.repeat(n)` on both backends (v0.3.6)**:
+  first dual-backend new method since the v0.3.x line started
+  — neither interp nor C backend had `repeat` before.  The
+  semantics match Rust's `str::repeat` for non-negative `n`:
+  `s.repeat(3)` on `"ab"` returns `"ababab"`, `s.repeat(0)`
+  returns `""`, `s.repeat(1)` is identity.  Negative `n` is
+  rejected at runtime in both backends with the same
+  `str.repeat: count must be non-negative` message — surfacing
+  the contract earlier than Rust's panic-on-usize-overflow.
+  C backend gains a `lingo_str_repeat(const char*, int64_t)`
+  runtime helper next to `lingo_str_replace`: single
+  allocation sized to exactly `n*s_len + 1` bytes (with an
+  early overflow check via division so `n` × `s_len` can't
+  silently wrap `size_t`), then a tight `memcpy` loop.  Empty
+  result for `n==0` is a 1-byte `'\0'` allocation so callers
+  always get a real heap pointer (consistent with the rest of
+  the str runtime).  `gen_str_method` gained the
+  `("repeat", 1)` arm; the empty-vec back-inference table
+  gained the `(Str, "repeat") -> Str` row.  new example
+  `str_repeat_native.lingo` (3x repeat, 20x banner, 0x empty,
+  1x identity, post-repeat `.len()`, chained inside f-strings).
+  3 new tests (`str_repeat_interp`,
+  `c_backend_str_repeat_native_matches_interp`,
+  `c_backend_str_repeat_negative_runtime_error`).  **95/95
+  green** (was 92/92).  audit **42/44** byte-identical.
+  clippy 0 warnings.
+
+- [x] **`s.find(needle) -> Opt[int]` on both backends (v0.3.7)**:
+  second dual-backend new method.  Returns the byte position
+  (0-based) of the first occurrence of `needle` in `s`, or
+  `none`.  Empty `needle` always matches at position 0
+  (Rust's `str::find("")` semantics).  Returns bytes-not-chars
+  to align with `s.len()` and the C `strstr` semantics; for
+  ASCII the bytes count == char count.  *Interp*: dispatch
+  arm in the str method table calls `s.find(&needle)` and
+  wraps the result in `Value::Opt`.  *C backend*: `find`
+  lowers to a stmt-expr `({ const char* p = strstr(s, n);
+  p ? (lingo_opt_i64_t){ true, p - s } : { false, 0 }; })`
+  reusing the unconditionally-reserved `lingo_opt_i64_t`
+  typedef from v0.2.1 — no new runtime helpers needed, just
+  a 6-line GCC stmt-expr.  Empty-vec back-inference table
+  gained the `(Str, "find") -> Opt[i64]` row so a `let mut
+  acc = vec[]; acc.push(s.find(...))` would back-infer to
+  `vec[Opt[i64]]` (typedef + helpers would be wired through
+  the existing struct-of-Opt path on demand; for v0.3.7 we
+  don't ship that example).  *Limitation called out for
+  v0.3.8*: `Opt[T]` as a function parameter type
+  (`fn show(o: Opt[int]):`) is not yet accepted by the C
+  backend's `map_type_with` — it needs an explicit `Opt`
+  arm next to `vec`/`map`/`Result`.  The example uses inline
+  `match` instead of factoring into a helper fn.  new example
+  `str_find_native.lingo`.  2 new tests (`str_find_interp`,
+  `c_backend_str_find_native_matches_interp`).  **97/97 green**
+  (was 95/95).  audit **43/45** byte-identical.  clippy 0
+  warnings.
+
+- [x] **`Opt[T]` as a first-class type annotation (v0.3.8)**:
+  closes the limitation called out in v0.3.7.  `map_type_with`
+  gained an `Opt` arm next to `vec`/`map`/`Result` — accepts
+  primitives, structs, and enums as the inner type with the
+  same monomorphization-friendly restrictions as `vec[T]`.
+  A new helper `register_compound_types(&mut self, ty)` walks
+  every CType recursively and registers nested `Opt[T]` /
+  `Result[T,E]` suffixes into `self.opt_types` and
+  `self.result_pairs`; `register_fn_sig` calls it for each
+  param + return type so signatures alone drive typedef
+  emission, without waiting for a call site.  Per-T
+  `lingo_opt_<sfx>_str` formatters are now emitted in
+  `gen_program` after the `lingo_show_vec_<T>` block — one
+  per non-`i64` suffix in `self.opt_types`, with appropriate
+  inner-type formatting (primitives via `lingo_fmt_alloc`,
+  strings as passthrough, structs/enums via their per-type
+  `lingo_show_<T>` helper).  `i64` stays in the static splice
+  for backward compat.  Net effect: `fn show_opt(o: Opt[int])`
+  / `fn lookup() -> Opt[int]` / `let p: Opt[int] = ...`
+  all work end-to-end on both backends, byte-identical.  new
+  example `opt_param_native.lingo` (helper fn taking
+  `Opt[int]`, helper fn returning `Opt[int]`, explicit type
+  annotation on a let).  2 new tests (`opt_param_interp`,
+  `c_backend_opt_param_native_matches_interp`).  **99/99
+  green** (was 97/97).  audit **44/46** byte-identical.
+  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers

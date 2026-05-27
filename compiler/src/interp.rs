@@ -1811,9 +1811,40 @@ impl Interp {
                         let to = need_str(&vals[1], "replace")?;
                         Ok(Some(Value::Str(s.replace(&from, &to))))
                     }
+                    ("repeat", 1) => {
+                        // v0.3.6: `s.repeat(n)` — concatenate `s` with
+                        // itself `n` times.  `n == 0` returns "", negative
+                        // `n` is a runtime error (Rust's `str::repeat`
+                        // would panic on usize overflow; we surface the
+                        // contract earlier so the message is useful).
+                        let n = match &vals[0] {
+                            Value::Int(n) => *n,
+                            v => return Err(LingoError::new(Stage::Runtime,
+                                format!("str.repeat expects int, got {}", v.type_name()), call_span)),
+                        };
+                        if n < 0 {
+                            return Err(LingoError::new(Stage::Runtime,
+                                format!("str.repeat: count must be non-negative, got {}", n),
+                                call_span));
+                        }
+                        Ok(Some(Value::Str(s.repeat(n as usize))))
+                    }
+                    ("find", 1) => {
+                        // v0.3.7: `s.find(needle) -> Opt[int]`.  Returns
+                        // the byte position (0-based) of the first
+                        // occurrence of `needle` in `s`, or `none`.  Empty
+                        // `needle` always matches at position 0 (consistent
+                        // with Rust's `str::find("")` semantics).  Returns
+                        // bytes-not-chars to match `s.len()` and the C
+                        // backend's `strstr` semantics; for ASCII-only
+                        // inputs (the common case) bytes == chars.
+                        let needle = need_str(&vals[0], "find")?;
+                        let pos = s.find(&needle).map(|p| Value::Int(p as i64));
+                        Ok(Some(Value::Opt(pos.map(Box::new))))
+                    }
                     (m, n) => Err(LingoError::new(
                         Stage::Runtime,
-                        format!("no method `str.{}` with {} arg(s) (known: len/contains/starts_with/ends_with/to_lower/to_upper/trim/split/replace)", m, n),
+                        format!("no method `str.{}` with {} arg(s) (known: len/contains/starts_with/ends_with/to_lower/to_upper/trim/split/replace/repeat/find)", m, n),
                         call_span,
                     )),
                 }
