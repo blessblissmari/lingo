@@ -1459,3 +1459,133 @@ fn to_str_rejects_map_value() {
         .expect("run lingo emit-c");
     assert!(!out.status.success(), "should reject to_str(map) on C backend");
 }
+
+
+// ─────────────────────────────────────────────────────────────────────
+// v0.3.9: ternary `if-then-else` expression, compound-assign operators,
+// and tail-position auto-`?`.  All three were called out in the v0.3.x
+// audit (see PR description) — landing them together because they all
+// affect the way one writes ordinary control-flow code.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn if_then_else_interp() {
+    let (stdout, stderr, code) = run("if_then_else.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "odd\n17 is pos\n0 is zero\n-5 is neg\nB\nbig\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_if_then_else_native() {
+    let Some((stdout, stderr, code)) = run_native("if_then_else.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("if_then_else.lingo");
+    assert_eq!(stdout, interp_out, "interp ≡ native byte-identical");
+}
+
+#[test]
+fn if_then_else_rejects_non_bool_cond_native() {
+    // The ternary form requires a `bool` condition (no truthiness rule,
+    // same as the statement form).  C backend should reject at resolve
+    // stage with a clear message — no `cc` leak.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_ternary_bad_cond.lingo");
+    std::fs::write(&path, "fn main():\n    let x = if 1 then 2 else 3\n    print(x)\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "should reject non-bool ternary cond");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`if`-`then`-`else` condition must be `bool`"),
+        "wrong diagnostic: {stderr}"
+    );
+    assert!(!stderr.contains("cc failed"), "leaked cc failure: {stderr}");
+}
+
+#[test]
+fn if_then_else_rejects_branch_type_mismatch_native() {
+    // C backend ternary needs both arms to share a static type so the
+    // `(cond ? a : b)` C expression has one — mismatches must surface
+    // at resolve stage, not as a downstream `cc` warning.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_ternary_bad_arms.lingo");
+    std::fs::write(
+        &path,
+        "fn main():\n    let x = if true then 1 else \"s\"\n    print(x)\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "should reject type-mismatched arms");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`if`-`then`-`else` branches have different types"),
+        "wrong diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn compound_assign_interp() {
+    let (stdout, stderr, code) = run("compound_assign.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "5\n-7\n15\n3.0\nhi there\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_compound_assign_native() {
+    let Some((stdout, stderr, code)) = run_native("compound_assign.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("compound_assign.lingo");
+    assert_eq!(stdout, interp_out, "interp ≡ native byte-identical");
+}
+
+#[test]
+fn return_fallible_interp() {
+    let (stdout, stderr, code) = run("return_fallible.lingo");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = "= 42\ndiv by zero\nbad op: mod\n";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn c_backend_return_fallible_native() {
+    let Some((stdout, stderr, code)) = run_native("return_fallible.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("return_fallible.lingo");
+    assert_eq!(stdout, interp_out, "interp ≡ native byte-identical");
+}
+
+#[test]
+fn return_fallible_mismatched_e_native_diagnostic() {
+    // When the inner fallible's E differs from the caller's E, native
+    // should surface a resolve-stage diagnostic naming both result
+    // types and pointing at the standard fixes (`?` with `else` or a
+    // `From` impl).  Pre-v0.3.9 this leaked a `cc` type error.
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_return_bad_e.lingo");
+    let src = "enum E1:\n    A\n\nenum E2:\n    B\n\n\
+               fn x() -> int ! E1:\n    raise E1.A\n\n\
+               fn y() -> int ! E2:\n    return x()\n\n\
+               fn main():\n    match y():\n        ok(_): print(0)\n        err(_): print(1)\n";
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "should reject E-mismatch in tail return");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("tail-position `return <fallible>` requires the inner result type"),
+        "wrong diagnostic: {stderr}"
+    );
+    assert!(!stderr.contains("cc failed"), "leaked cc failure: {stderr}");
+}

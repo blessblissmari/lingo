@@ -1,0 +1,15 @@
+# classic fizzbuzz, lingo edition.
+# tries the obvious shape first.
+
+fn fizzbuzz(n: int) -> str:
+    if n % 15 == 0:
+        return "FizzBuzz"
+    elif n % 3 == 0:
+        return "Fizz"
+    elif n % 5 == 0:
+        return "Buzz"
+    return to_str(n)
+
+fn main():
+    for i in 1..16:
+        print(fizzbuzz(i))

@@ -610,3 +610,109 @@ impl Bag[int] for IntBag:
   "structural-helpers-for-data-types" gap: any v0.3.x program
   can compare two values for equality and turn either of them
   into a printable string without writing a single helper.
+
+
+
+### v0.3.9 — three audit-driven ergonomics fixes
+
+A practical audit of the language (writing four end-to-end programs
+on top of v0.3.8) surfaced three concrete pain points where the
+documentation already described a feature but the parser/backends
+silently disagreed.  v0.3.9 closes all three.  No new design rules:
+each entry below is the existing `SYNTAX.md` / `GRAMMAR.bnf` rule,
+finally enforced.
+
+#### ternary `if cond then a else b` (expression form)
+
+```lingo
+let mood = if 7 % 2 == 0 then "even" else "odd"
+let grade = if score >= 90 then "A" else if score >= 80 then "B" else "C"
+```
+
+- Rule documented in `SYNTAX.md` since phase 0; `Tok::Then` was
+  reserved by the lexer all along and the docs even spelled out
+  the syntax.  The parser just never accepted it in expression
+  position, forcing every short branch into a multi-line
+  `let mut x = default; if cond: x = ...` shape.
+- Statement-position `if cond:` is unchanged.  The ternary form
+  is **only** legal in expression contexts (let-rhs, function
+  args, struct fields, f-string interpolations, vec/map literals,
+  the rhs of `return`).
+- Both arms must produce the same type.  The C backend rejects
+  branch-type mismatches at *resolve* stage — `cc` never gets a
+  chance to emit a downstream diagnostic.
+- Condition must be `bool` (no truthiness, same as the statement
+  form).  Both backends agree on the diagnostic shape.
+- `elif` is **not** part of the ternary surface — chain with
+  nested `if-then-else` instead, or fall back to a regular
+  `if`/`elif`/`else` statement when the body grows past one
+  expression.  This keeps the ternary visually distinct from
+  multi-arm control flow.
+
+#### compound-assign operators `+= -= *= /= %=`
+
+```lingo
+let mut total = 0
+for v in xs:
+    total += v
+```
+
+- Listed in `GRAMMAR.bnf` since phase 0 as `AssignOp ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="` —
+  but the parser only accepted the bare `=` form, so the obvious
+  accumulator pattern read `total = total + v`, every time.
+- Desugared by the parser into `target = target OP value` so
+  neither the interpreter nor the C backend sees a new statement
+  shape.  Same LHS rule as plain `=`: must be a name or a field
+  access.  Same compound-assign semantics as Rust / Python /
+  C — including `s += " "` for `str` (which goes through the
+  existing `+` concat path) and `f *= 2.0` for `f64`.
+- `**=` was considered and dropped.  Power isn't an accumulator
+  pattern in any program we'd seen, and adding the token would
+  need three more lexer cases for negligible win.  Use
+  `n = n ** k` if you really want it.
+- No `&=`, `|=`, `^=`, `<<=`, `>>=` — bitwise ops aren't in
+  v0.1 / v0.2 / v0.3 yet, so no compound-assigns for them
+  either.  We add them together when they land.
+
+#### tail-position auto-`?` for `return <fallible_call>`
+
+```lingo
+fn run(a: int, b: int) -> int ! Err:
+    return apply(a: a, b: b)   # apply is `int ! Err`; no `?` needed
+```
+
+- Pre-v0.3.9, this snippet *silently double-wrapped* in the
+  interpreter (the value reached every downstream `match ok(n) /
+  err(e)` site as `Result_(Ok(Result_(Ok(42))))`, so the
+  outer `ok(n)` arm bound `n` to the inner result instead of
+  the unwrapped int) and produced an inscrutable `cc` type
+  error in the native backend (`incompatible types when
+  initializing type 'long int' using type 'lingo_result_..._t'`).
+  Both diverged from the obvious user intent.
+- v0.3.9 normalises both backends.  When the inner expression
+  in a `return` already evaluates to the same `T ! E` shape
+  as the enclosing fn, the value is forwarded as-is — same
+  semantics as `return foo()?;` but without the visual clutter
+  at every tail call.  Errors still propagate through whatever
+  match arms the caller has.
+- This is **not** a coercion: the inner `(T, E)` and the outer
+  `(T, E)` must be exactly the same.  When E differs, both
+  backends still reject — the C backend emits a resolve-stage
+  diagnostic naming both result types and pointing at the
+  standard fixes (`?` with `else`, or an `impl From[..] for ..:`).
+  Pre-v0.3.9 this leaked through as a `cc` type error.
+- The interpreter is the canonical truth here: when its
+  `Flow::Return(v)` carries a `Value::Result_(...)`, it passes
+  through; otherwise it wraps as the `ok` variant.  The C
+  backend mirrors this with a `val_ty == res_ty` check at the
+  return site.  Both paths produce the same wire output across
+  the audit corpus.
+- Why "tail-position" only: `let r = foo(); return r` (where
+  `foo` is fallible) leaves `r: T ! E` as a Result value that
+  the user has explicit access to — they can `match` on it,
+  or `?` it, or stuff it in a vec.  The auto-pass-through only
+  fires when the user wrote `return <expr>` directly *and* the
+  inferred type already matches.  Composing the rule any more
+  loosely would invite "did this propagate the error or just
+  silently swallow it?" surprises in the middle of an
+  expression.

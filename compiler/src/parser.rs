@@ -696,6 +696,39 @@ impl Parser {
                         value,
                         span: Span::new(expr.span.start, end),
                     })
+                } else if let Some(op) = compound_assign_op(self.peek_tok()) {
+                    // v0.3.9: compound assignment `x += e` desugars to `x = x + e`
+                    // at parse time.  Same constraint on the LHS as `=`: must be
+                    // a name or a field access.  We synthesize the right-hand
+                    // side as a `Binary(op, lhs, rhs)` so neither the interpreter
+                    // nor the C backend needs a new path.
+                    let op_tok = self.advance();
+                    let rhs = self.expr()?;
+                    let end = rhs.span.end;
+                    self.expect(Tok::Newline, "newline")?;
+                    let target = match expr.kind.clone() {
+                        ExprKind::Ident(s) => AssignTarget::Name(s),
+                        ExprKind::Field(obj, name) => AssignTarget::Field(obj, name),
+                        _ => {
+                            return Err(LingoError::new(
+                                Stage::Parse,
+                                format!(
+                                    "left side of `{:?}` must be a name or a field access",
+                                    op_tok.tok
+                                ),
+                                expr.span,
+                            ))
+                        }
+                    };
+                    let combined = Expr {
+                        kind: ExprKind::Binary(op, Box::new(expr.clone()), Box::new(rhs)),
+                        span: Span::new(expr.span.start, end),
+                    };
+                    Ok(Stmt::Assign {
+                        target,
+                        value: combined,
+                        span: Span::new(expr.span.start, end),
+                    })
                 } else {
                     self.expect(Tok::Newline, "newline")?;
                     Ok(Stmt::Expr(expr))
@@ -1459,11 +1492,53 @@ impl Parser {
                 self.expect(Tok::RParen, "`)`")?;
                 Ok(e)
             }
+            // v0.3.9: ternary `if <cond> then <then> else <else>` expression.
+            // Documented in SYNTAX.md and GRAMMAR.bnf since phase 0 but
+            // not implemented before now.  Statement-position `if` is
+            // dispatched by `stmt()` before `expr()` runs, so adding
+            // an arm here doesn't conflict.
+            Tok::If => {
+                let if_tok = self.advance();
+                let cond = self.expr()?;
+                self.expect(
+                    Tok::Then,
+                    "`then` after `if <cond>` (use a regular `if:` statement for multi-line bodies)",
+                )?;
+                let then_branch = self.expr()?;
+                self.expect(
+                    Tok::Else,
+                    "`else` after `if <cond> then <expr>` (the ternary form requires both arms)",
+                )?;
+                let else_branch = self.expr()?;
+                let span = Span::new(if_tok.span.start, else_branch.span.end);
+                Ok(Expr {
+                    kind: ExprKind::IfThenElse {
+                        cond: Box::new(cond),
+                        then_branch: Box::new(then_branch),
+                        else_branch: Box::new(else_branch),
+                    },
+                    span,
+                })
+            }
             other => Err(LingoError::new(
                 Stage::Parse,
                 format!("expected an expression, got {:?}", other),
                 tok.span,
             )),
         }
+    }
+}
+
+/// v0.3.9: map a compound-assign token to the binary operator it
+/// stands for.  Returns `None` for non-compound-assign tokens so the
+/// caller can fall through to a plain expression statement.
+fn compound_assign_op(t: &Tok) -> Option<BinOp> {
+    match t {
+        Tok::PlusEq => Some(BinOp::Add),
+        Tok::MinusEq => Some(BinOp::Sub),
+        Tok::StarEq => Some(BinOp::Mul),
+        Tok::SlashEq => Some(BinOp::Div),
+        Tok::PercentEq => Some(BinOp::Mod),
+        _ => None,
     }
 }

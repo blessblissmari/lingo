@@ -340,6 +340,72 @@ programs aren't forced to live in one `.lingo` file.
   green** (was 97/97).  audit **44/46** byte-identical.
   clippy 0 warnings.
 
+- [x] **v0.3 ergonomics audit fixes (v0.3.9)**: an end-to-end audit
+  (writing four real programs — fizzbuzz, cli calculator, todo
+  list with file IO, text-adventure FSM — on top of v0.3.8)
+  surfaced three concrete pain points where the docs already
+  described a feature but the parser/backends silently disagreed.
+  All three close together because they hit the same writing-real-
+  code workflow.
+
+  **A — ternary `if cond then a else b` expression form.**
+  Documented in `SYNTAX.md` and `GRAMMAR.bnf` since phase 0;
+  `Tok::Then` was reserved by the lexer all along.  The parser
+  just never accepted it in expression position, so every short
+  branch had to spell out `let mut x = default; if cond: x = ...`.
+  v0.3.9 adds an `IfThenElse { cond, then_branch, else_branch }`
+  arm to `ExprKind`, parses `if <expr> then <expr> else <expr>`
+  in `primary()` (after `Tok::LParen`), and lowers it on both
+  backends.  Interp evaluates branches lazily.  C backend lowers
+  to a C ternary `((cond) ? (a) : (b))` with two resolve-stage
+  guards: condition must be `bool` (no truthiness) and both
+  branches must produce the same `CType` — mismatches surface
+  cleanly before `cc` ever runs.  No `elif` in the ternary form
+  — chain with nested `if-then-else` or fall back to a regular
+  statement.
+
+  **B — compound-assign operators `+= -= *= /= %=`.** Listed in
+  `GRAMMAR.bnf` since phase 0 as `AssignOp ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="`.
+  v0.3.9 adds the five lexer tokens (`PlusEq`, `MinusEq`,
+  `StarEq`, `SlashEq`, `PercentEq`) and a parser-level desugar
+  `target OP= rhs` → `target = target OP rhs`.  Same LHS rule
+  as plain `=`: must be a name or a field access.  Same compound-
+  assign semantics as Rust/Python/C — including `s += " "` on
+  `str` (concat) and `f *= 2.0` on `f64`.  No interp/codegen
+  changes — the desugar produces an existing `Stmt::Assign`
+  shape.  `**=` was considered and dropped; bitwise compound-
+  assigns wait for the bitwise ops to land.
+
+  **C — tail-position auto-`?` for `return <fallible_call>`.**
+  This is the audit's "critical bug": pre-v0.3.9, writing
+  `return apply(...)` from a `fn run() -> int ! E` where
+  `apply` *also* returns `int ! E` silently double-wrapped
+  in the interpreter (the value reached every downstream
+  `match ok(n) / err(e)` site as `Result_(Ok(Result_(Ok(42))))`,
+  so the `ok(n)` arm bound `n` to the inner result instead of
+  the unwrapped int) and produced an inscrutable `cc` type
+  error in the native backend.  Both diverged from the obvious
+  user intent.  v0.3.9 normalises both: when the inner
+  expression already evaluates to the same `T ! E` shape as
+  the enclosing fn, the value is forwarded as-is — equivalent
+  to `return foo()?;` semantics, no source clutter.  Interp
+  side: `call_fn`'s `Flow::Return(v)` arm passes through
+  when `v` is already `Value::Result_(_)`.  C backend: `Stmt::Return`
+  in a fallible fn now compares `gen_expr(v).val_ty` against
+  the enclosing `lingo_result_<T>_<E>_t`; if equal, emits
+  `return <code>;` directly; if `val_ty` is *also* a Result
+  but with a different `(T,E)` shape, emits a resolve-stage
+  diagnostic naming both result types and pointing at the
+  standard fixes (`?` with `else`, or `impl From[..] for ..:`)
+  — pre-v0.3.9 this leaked a bare `cc` error.
+
+  3 new examples (`if_then_else.lingo`, `compound_assign.lingo`,
+  `return_fallible.lingo`).  9 new integration tests + 3
+  negative-diagnostic tests = **108/108 green** (was 99/99).
+  Audit reports **47/49** examples byte-identical (was 44/46;
+  +3 numerator and +3 denominator from the new examples).
+  clippy 0 warnings.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers

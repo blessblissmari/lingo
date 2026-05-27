@@ -1,0 +1,31 @@
+# v0.3.9: ternary `if <cond> then <expr> else <expr>` expression.
+# Documented in SYNTAX.md and GRAMMAR.bnf since phase 0; landed in v0.3.9.
+#
+# Statement-position `if ...:` is unchanged — the ternary form is only
+# legal in expression contexts (let-rhs, function args, struct fields,
+# inside f-strings, etc).  Both arms must produce the same type; the
+# C backend rejects mismatches with a resolve-stage error.
+
+fn classify(n: int) -> str:
+    return if n < 0 then "neg" else if n == 0 then "zero" else "pos"
+
+fn main():
+    # the canonical use: pick a value at a let-site instead of writing
+    # `let mut x = default; if cond: x = other_value`.
+    let mood = if 7 % 2 == 0 then "even" else "odd"
+    print(mood)
+
+    # works in f-string interpolations too.
+    let n = 17
+    print(f"{n} is {classify(n)}")
+    print(f"{0} is {classify(0)}")
+    print(f"{-5} is {classify(-5)}")
+
+    # nested ternary chains read like a small lookup.
+    let grade = if 85 >= 90 then "A" else if 85 >= 80 then "B" else "C"
+    print(grade)
+
+    # condition is a real bool expression.
+    let xs = vec[1, 2, 3, 4]
+    let big = if xs.len() > 3 then "big" else "small"
+    print(big)

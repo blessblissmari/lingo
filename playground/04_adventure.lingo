@@ -1,0 +1,257 @@
+# tiny text adventure: a state machine driven by cli verbs.
+# the "world" is hardcoded; each invocation reads/writes /tmp/lingo_world.txt.
+#
+#   lingo 04_adventure.lingo look
+#   lingo 04_adventure.lingo go north
+#   lingo 04_adventure.lingo take key
+#   lingo 04_adventure.lingo open door
+#
+# this stresses: enums-with-payloads, structs, vec[Item],
+# match on multi-arity variants, file io as state persistence.
+
+const WORLD = "/tmp/lingo_world.txt"
+
+enum Room:
+    Hallway
+    Library
+    Garden
+    Vault
+
+enum Item:
+    Key
+    Map
+    Coin
+
+struct World:
+    room: Room
+    inventory: vec[Item]
+    door_open: bool
+
+fn room_name(r: Room) -> str:
+    match r:
+        Room.Hallway: return "hallway"
+        Room.Library: return "library"
+        Room.Garden:  return "garden"
+        Room.Vault:   return "vault"
+
+fn item_name(i: Item) -> str:
+    match i:
+        Item.Key:  return "key"
+        Item.Map:  return "map"
+        Item.Coin: return "coin"
+
+fn parse_room(s: str) -> Room ! str:
+    if s == "hallway":
+        return Room.Hallway
+    elif s == "library":
+        return Room.Library
+    elif s == "garden":
+        return Room.Garden
+    elif s == "vault":
+        return Room.Vault
+    raise "unknown room: " + s
+
+fn parse_item(s: str) -> Item ! str:
+    if s == "key":
+        return Item.Key
+    elif s == "map":
+        return Item.Map
+    elif s == "coin":
+        return Item.Coin
+    raise "unknown item: " + s
+
+fn save(w: World) -> str ! str:
+    let mut buf = room_name(w.room) + "\n"
+    let door = if w.door_open then "1" else "0"
+    buf = buf + door + "\n"
+    for it in w.inventory:
+        buf = buf + item_name(it) + ","
+    buf = buf + "\n"
+    return write_file(WORLD, buf)?
+
+fn fresh_world() -> World:
+    return World{room: Room.Hallway, inventory: vec[], door_open: false}
+
+fn load() -> World ! str:
+    match read_file(WORLD):
+        ok(content):
+            let lines = content.split("\n")
+            if lines.len() < 3:
+                return fresh_world()
+            let room = parse_room(lines.get(0))?
+            let door = lines.get(1) == "1"
+            let mut inv: vec[Item] = vec[]
+            for tok in lines.get(2).split(","):
+                if tok.len() == 0:
+                    continue
+                match parse_item(tok):
+                    ok(it):
+                        inv.push(it)
+                    err(_):
+                        continue
+            return World{room: room, inventory: inv, door_open: door}
+        err(_):
+            return fresh_world()
+
+# --- world description ---------------------------------------------
+
+fn here(w: World) -> str:
+    match w.room:
+        Room.Hallway:
+            return "you are in a dim hallway. exits: north (library), east (garden)."
+        Room.Library:
+            return "shelves of dusty books. there is a key on the floor. exits: south (hallway)."
+        Room.Garden:
+            return "a quiet garden. a coin glints in the grass. exits: west (hallway), north (vault)."
+        Room.Vault:
+            let mut suffix = "the door is shut tight. exits: south (garden)."
+            if w.door_open:
+                suffix = "the door is open. inside, a dragon naps on a pile of gold."
+            return "you stand before a heavy iron door. " + suffix
+
+fn show_inventory(w: World):
+    if w.inventory.len() == 0:
+        print("inventory: (empty)")
+        return
+    let mut line = "inventory:"
+    for it in w.inventory:
+        line = line + " " + item_name(it)
+    print(line)
+
+# --- movement ------------------------------------------------------
+
+fn move_to(w: World, dir: str) -> Room ! str:
+    match w.room:
+        Room.Hallway:
+            if dir == "north":
+                return Room.Library
+            elif dir == "east":
+                return Room.Garden
+            raise "you can't go " + dir + " from here"
+        Room.Library:
+            if dir == "south":
+                return Room.Hallway
+            raise "you can't go " + dir + " from here"
+        Room.Garden:
+            if dir == "west":
+                return Room.Hallway
+            elif dir == "north":
+                return Room.Vault
+            raise "you can't go " + dir + " from here"
+        Room.Vault:
+            if dir == "south":
+                return Room.Garden
+            raise "you can't go " + dir + " from here"
+
+fn has_item(w: World, target: Item) -> bool:
+    for it in w.inventory:
+        if item_name(it) == item_name(target):
+            return true
+    return false
+
+# --- commands ------------------------------------------------------
+
+fn cmd_look():
+    match load():
+        ok(w):
+            print(here(w))
+            show_inventory(w)
+        err(e):
+            print(f"world is broken: {e}")
+
+fn cmd_go(dir: str):
+    match load():
+        ok(w):
+            match move_to(w, dir):
+                ok(next):
+                    let new_world = World{room: next, inventory: w.inventory, door_open: w.door_open}
+                    match save(new_world):
+                        ok(_):
+                            print("you go " + dir + ".")
+                            print(here(new_world))
+                        err(e): print(f"can't save: {e}")
+                err(e): print(e)
+        err(e): print(f"world is broken: {e}")
+
+fn cmd_take(name: str):
+    match load():
+        ok(w):
+            # is this item available here?
+            let mut available = false
+            if w.room == Room.Library and name == "key":
+                available = true
+            elif w.room == Room.Garden and name == "coin":
+                available = true
+            if not available:
+                print(f"there's no {name} here")
+                return
+            match parse_item(name):
+                ok(it):
+                    let mut inv = w.inventory
+                    inv.push(it)
+                    let new_world = World{room: w.room, inventory: inv, door_open: w.door_open}
+                    match save(new_world):
+                        ok(_): print(f"you take the {name}")
+                        err(e): print(f"can't save: {e}")
+                err(_):
+                    print(f"can't take a {name}")
+        err(e): print(f"world is broken: {e}")
+
+fn cmd_open(thing: str):
+    if thing != "door":
+        print(f"you can't open a {thing}")
+        return
+    match load():
+        ok(w):
+            if w.room != Room.Vault:
+                print("there's no door here")
+                return
+            if w.door_open:
+                print("it's already open")
+                return
+            if not has_item(w, Item.Key):
+                print("the door is locked. you need a key.")
+                return
+            let new_world = World{room: w.room, inventory: w.inventory, door_open: true}
+            match save(new_world):
+                ok(_):
+                    print("the lock clicks. the door swings open.")
+                    print(here(new_world))
+                err(e): print(f"can't save: {e}")
+        err(e): print(f"world is broken: {e}")
+
+fn cmd_reset():
+    match save(fresh_world()):
+        ok(_):  print("world reset.")
+        err(e): print(f"can't save: {e}")
+
+fn usage():
+    print("commands: look | go <dir> | take <item> | open <thing> | reset")
+
+fn main():
+    let argv = args()
+    if argv.len() == 0:
+        usage()
+        return
+    let verb = argv.get(0)
+    if verb == "look":
+        cmd_look()
+    elif verb == "go":
+        if argv.len() < 2:
+            print("go where?")
+            return
+        cmd_go(argv.get(1))
+    elif verb == "take":
+        if argv.len() < 2:
+            print("take what?")
+            return
+        cmd_take(argv.get(1))
+    elif verb == "open":
+        if argv.len() < 2:
+            print("open what?")
+            return
+        cmd_open(argv.get(1))
+    elif verb == "reset":
+        cmd_reset()
+    else:
+        usage()

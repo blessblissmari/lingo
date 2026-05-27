@@ -1,0 +1,47 @@
+# simple cli calculator: lingo run 02_calc.lingo 12 + 30
+# four ops, integer math, error messages via T ! E.
+
+enum CalcError:
+    BadArgc
+    BadOp(str)
+    BadInt(str)
+    DivByZero
+
+impl From[str] for CalcError:
+    fn from(e: str) -> CalcError:
+        return CalcError.BadInt(e)
+
+fn apply(a: int, op: str, b: int) -> int ! CalcError:
+    if op == "+":
+        return a + b
+    elif op == "-":
+        return a - b
+    elif op == "*" or op == "x":
+        return a * b
+    elif op == "/":
+        if b == 0:
+            raise CalcError.DivByZero
+        return a / b
+    raise CalcError.BadOp(op)
+
+fn run(argv: vec[str]) -> int ! CalcError:
+    # args() does not include the program name — argv[0] is the first user arg.
+    if argv.len() != 3:
+        raise CalcError.BadArgc
+    let a = int(argv.get(0))?
+    let op = argv.get(1)
+    let b = int(argv.get(2))?
+    return apply(a: a, op: op, b: b)
+
+fn main():
+    match run(args()):
+        ok(n):
+            print(f"= {n}")
+        err(CalcError.BadArgc):
+            print("usage: calc <a> <op> <b>")
+        err(CalcError.BadOp(o)):
+            print(f"unknown op: {o}")
+        err(CalcError.BadInt(s)):
+            print(f"bad int: {s}")
+        err(CalcError.DivByZero):
+            print("division by zero")

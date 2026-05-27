@@ -282,6 +282,20 @@ pub enum ExprKind {
     /// Lowered to an infinite loop. Not a value; cannot be assigned, returned,
     /// printed, etc.
     Forever,
+    /// v0.3.9: ternary `if cond then a else b` expression.
+    /// Parses in expression position only — top-level `if` stays a
+    /// statement and is handled by `if_stmt()`.  Both branches must
+    /// produce the same type (the C backend enforces this; the
+    /// interpreter is naturally tolerant since it's dynamically
+    /// typed).  No `elif` chain — write a sequence of `if`-`then`-`if`
+    /// or fall back to a regular `if`-statement when the condition
+    /// gets multi-arm.  Documented in `docs/SYNTAX.md` and
+    /// `docs/GRAMMAR.bnf` since phase 0; implemented in v0.3.9.
+    IfThenElse {
+        cond: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]

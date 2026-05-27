@@ -1,0 +1,148 @@
+# a tiny todo-list:
+#   - vec[Todo] storage in memory
+#   - load/save by serialising to a tiny line-based text format
+#   - cli verbs: add / list / done / remove
+#
+# usage:
+#   lingo 03_todo.lingo add "buy milk"
+#   lingo 03_todo.lingo list
+#   lingo 03_todo.lingo done 2
+#   lingo 03_todo.lingo remove 1
+#
+# storage format: one item per line, "1|0|buy milk"  (id | done | text)
+
+const STORE = "/tmp/lingo_todo.txt"
+
+struct Todo:
+    id: int
+    done: bool
+    text: str
+
+fn parse_line(line: str) -> Todo ! str:
+    # very crude split-on-pipe parser. enough for our format.
+    let parts = line.split("|")
+    if parts.len() != 3:
+        raise "bad line"
+    let id = int(parts.get(0))?
+    let flag = int(parts.get(1))?
+    let text = parts.get(2)
+    return Todo{id: id, done: flag == 1, text: text}
+
+fn load() -> vec[Todo]:
+    let mut items: vec[Todo] = vec[]
+    match read_file(STORE):
+        ok(content):
+            for line in content.split("\n"):
+                if line.len() == 0:
+                    continue
+                match parse_line(line):
+                    ok(t):
+                        items.push(t)
+                    err(_):
+                        # silently skip a corrupt line
+                        continue
+        err(_):
+            # no file yet, empty list
+            return items
+    return items
+
+fn save(items: vec[Todo]) -> str ! str:
+    let mut buf = ""
+    for t in items:
+        let flag = if t.done then "1" else "0"
+        buf = buf + to_str(t.id) + "|" + flag + "|" + t.text + "\n"
+    return write_file(STORE, buf)?
+
+fn next_id(items: vec[Todo]) -> int:
+    let mut max = 0
+    for t in items:
+        if t.id > max:
+            max = t.id
+    return max + 1
+
+fn cmd_add(text: str):
+    let mut items = load()
+    let id = next_id(items)
+    items.push(Todo{id: id, done: false, text: text})
+    match save(items):
+        ok(_): print(f"added #{id}: {text}")
+        err(e): print(f"save failed: {e}")
+
+fn cmd_list():
+    let items = load()
+    if items.len() == 0:
+        print("(no todos)")
+        return
+    for t in items:
+        let mark = if t.done then "x" else " "
+        print(f"  [{mark}] #{t.id} {t.text}")
+
+fn cmd_done(id_str: str):
+    match int(id_str):
+        ok(target):
+            let mut items = load()
+            let mut found = false
+            let n = items.len()
+            for i in 0..n:
+                let cur = items.get(i)
+                if cur.id == target:
+                    items.set(i, Todo{id: cur.id, done: true, text: cur.text})
+                    found = true
+            if not found:
+                print(f"no todo #{target}")
+                return
+            match save(items):
+                ok(_): print(f"done #{target}")
+                err(e): print(f"save failed: {e}")
+        err(e):
+            print(f"bad id: {e}")
+
+fn cmd_remove(id_str: str):
+    match int(id_str):
+        ok(target):
+            let old = load()
+            let mut kept: vec[Todo] = vec[]
+            for t in old:
+                if t.id != target:
+                    kept.push(t)
+            if kept.len() == old.len():
+                print(f"no todo #{target}")
+                return
+            match save(kept):
+                ok(_): print(f"removed #{target}")
+                err(e): print(f"save failed: {e}")
+        err(e):
+            print(f"bad id: {e}")
+
+fn usage():
+    print("usage:")
+    print("  todo add <text>")
+    print("  todo list")
+    print("  todo done <id>")
+    print("  todo remove <id>")
+
+fn main():
+    let argv = args()
+    if argv.len() == 0:
+        usage()
+        return
+    let verb = argv.get(0)
+    if verb == "list":
+        cmd_list()
+    elif verb == "add":
+        if argv.len() < 2:
+            print("add needs <text>")
+            return
+        cmd_add(argv.get(1))
+    elif verb == "done":
+        if argv.len() < 2:
+            print("done needs <id>")
+            return
+        cmd_done(argv.get(1))
+    elif verb == "remove":
+        if argv.len() < 2:
+            print("remove needs <id>")
+            return
+        cmd_remove(argv.get(1))
+    else:
+        usage()
