@@ -87,6 +87,15 @@ pub enum Tok {
     Ge,
     Bang,     // !
     Question, // ?
+    // v0.3.9: compound-assign operators (`+=` `-=` `*=` `/=` `%=`).
+    // Documented in `docs/GRAMMAR.bnf` since phase 0; implemented in
+    // v0.3.9.  Desugared by the parser into `target = target OP value`
+    // so neither the interpreter nor the C backend needs to know.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
 
     // layout
     Newline,
@@ -481,6 +490,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LingoError> {
             "<=" => (Tok::Le, 2),
             ">=" => (Tok::Ge, 2),
             "**" => (Tok::StarStar, 2),
+            "+=" => (Tok::PlusEq, 2),
+            "-=" => (Tok::MinusEq, 2),
+            "*=" => (Tok::StarEq, 2),
+            "/=" => (Tok::SlashEq, 2),
+            "%=" => (Tok::PercentEq, 2),
             _ => match b {
                 b'(' => {
                     paren_depth += 1;

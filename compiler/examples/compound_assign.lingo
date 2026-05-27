@@ -1,0 +1,38 @@
+# v0.3.9: compound-assign operators `+= -= *= /= %=`.
+# Documented in `docs/GRAMMAR.bnf` since phase 0; landed in v0.3.9.
+# Desugared by the parser into `target = target OP value` so the
+# interpreter and the C backend share one path with plain `=`.
+
+fn main():
+    let mut x = 10
+    x += 5
+    x -= 2
+    x *= 3
+    x /= 2
+    x %= 7
+    print(x)            # 10 -> 15 -> 13 -> 39 -> 19 -> 5
+
+    # negative right-hand side works.
+    let mut y = 0
+    y -= 5
+    y += -2
+    print(y)            # -7
+
+    # the canonical use: an accumulator pattern.
+    let xs = vec[1, 2, 3, 4, 5]
+    let mut total = 0
+    for v in xs:
+        total += v
+    print(total)        # 15
+
+    # f64 too — same mapping.
+    let mut f = 1.0
+    f += 0.5
+    f *= 2.0
+    print(f)            # 3.0
+
+    # str concat compound-assign.
+    let mut s = "hi"
+    s += " "
+    s += "there"
+    print(s)            # hi there

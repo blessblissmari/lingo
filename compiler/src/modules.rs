@@ -720,6 +720,11 @@ impl<'a> RewriteCtx<'a> {
                     .map(|f| self.rewrite_expr(*f).map(Box::new))
                     .transpose()?,
             },
+            ExprKind::IfThenElse { cond, then_branch, else_branch } => ExprKind::IfThenElse {
+                cond: Box::new(self.rewrite_expr(*cond)?),
+                then_branch: Box::new(self.rewrite_expr(*then_branch)?),
+                else_branch: Box::new(self.rewrite_expr(*else_branch)?),
+            },
             // Leaves — no recursion needed.
             other @ (ExprKind::Int(_)
             | ExprKind::Float(_)

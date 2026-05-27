@@ -1765,11 +1765,45 @@ impl Codegen {
                         "C backend: `return` without a value in a fallible function isn't supported yet",
                         Span::dummy(),
                     ))?;
-                    let (code, _) = self.gen_expr(v)?;
+                    let (code, val_ty) = self.gen_expr(v)?;
                     let res_ty = CType::Result(Box::new(raises.0.clone()), Box::new(raises.1.clone()));
-                    writeln!(self.body,
-                        "{}return ({}){{ .is_err = false, .ok = {} }};",
-                        self.pad(), res_ty.c_decl(), code).unwrap();
+                    // v0.3.9: tail-position auto-`?`.  When the inner
+                    // expression *already* evaluates to the same
+                    // `lingo_result_<T>_<E>_t` as the enclosing fn —
+                    // typical case: `return some_other_fallible_call()`
+                    // where E matches — pass the value through directly
+                    // instead of wrapping it as the `ok` variant of a
+                    // brand-new result struct (which would be a C type
+                    // mismatch — `int` field receiving a `Result` value).
+                    // Equivalent in source: `return foo()?;`, but with the
+                    // "of course this is what i meant" ergonomics that
+                    // matches every other tail-call language.
+                    if val_ty == res_ty {
+                        writeln!(self.body, "{}return {};", self.pad(), code).unwrap();
+                    } else if matches!(val_ty, CType::Result(..)) {
+                        // Inner expr is a Result, but with a different
+                        // (T, E) shape.  Pre-v0.3.9 this leaked a `cc`
+                        // type-mismatch diagnostic.  Now it's a
+                        // resolve-stage error with the same shape as
+                        // the `?` operator's "error type doesn't
+                        // match" diagnostic, suggesting the standard
+                        // fix: spell out the coercion via `?` (with
+                        // `else` or a `From` impl).
+                        return Err(LingoError::new(
+                            Stage::Resolve,
+                            format!(
+                                "C backend: tail-position `return <fallible>` requires the inner result type `{}` to match the enclosing fn's `{}`. \
+                                 Use `return <expr>?` with `else` or an `impl From[..] for ..:` to coerce the inner error.",
+                                val_ty.c_decl(),
+                                res_ty.c_decl()
+                            ),
+                            v.span,
+                        ));
+                    } else {
+                        writeln!(self.body,
+                            "{}return ({}){{ .is_err = false, .ok = {} }};",
+                            self.pad(), res_ty.c_decl(), code).unwrap();
+                    }
                 } else if let Some(e) = value {
                     let (code, _) = self.gen_expr(e)?;
                     writeln!(self.body, "{}return {};", self.pad(), code).unwrap();
@@ -2848,6 +2882,39 @@ impl Codegen {
                     "`forever` is not a value — it can only be the iterable of `for _ in forever:`",
                     e.span,
                 ));
+            }
+            ExprKind::IfThenElse { cond, then_branch, else_branch } => {
+                // v0.3.9: ternary `if <cond> then <a> else <b>` lowers to
+                // a C ternary `(cond ? a : b)`.  Both branches must produce
+                // the same C type — without that, the conditional
+                // expression has no single static type, and a future cc
+                // diagnostic would be much harder to read than the
+                // resolve-stage one we emit here.
+                let (cc, c_ty) = self.gen_expr(cond)?;
+                if c_ty != CType::Bool {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!(
+                            "C backend: `if`-`then`-`else` condition must be `bool`, got `{}`",
+                            c_ty.c_decl()
+                        ),
+                        cond.span,
+                    ));
+                }
+                let (tc, t_ty) = self.gen_expr(then_branch)?;
+                let (ec, e_ty) = self.gen_expr(else_branch)?;
+                if t_ty != e_ty {
+                    return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!(
+                            "C backend: `if`-`then`-`else` branches have different types: `{}` vs `{}`",
+                            t_ty.c_decl(),
+                            e_ty.c_decl()
+                        ),
+                        e.span,
+                    ));
+                }
+                (format!("(({}) ? ({}) : ({}))", cc, tc, ec), t_ty)
             }
             ExprKind::Ident(name) => {
                 let ty = self.lookup_var(name).ok_or_else(|| {

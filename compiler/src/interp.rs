@@ -580,7 +580,21 @@ impl Interp {
         match flow? {
             Flow::Return(v) => {
                 if is_fallible {
-                    Ok(Value::Result_(Rc::new(Ok(v))))
+                    // v0.3.9: tail-position auto-`?`.  When the user
+                    // writes `return foo()` from a fallible fn and
+                    // `foo()` is *itself* fallible (returning a
+                    // `Value::Result_`), pass it through instead of
+                    // re-wrapping.  Pre-v0.3.9 this silently produced
+                    // a doubly-wrapped result (`Result_(Ok(Result_(..)))`),
+                    // which then misbehaved at every `match ok(n) /
+                    // err(e)` site downstream.  The C backend already
+                    // type-checks this case (the same fix below) — the
+                    // interpreter just needs the same shape rule.
+                    if matches!(v, Value::Result_(_)) {
+                        Ok(v)
+                    } else {
+                        Ok(Value::Result_(Rc::new(Ok(v))))
+                    }
                 } else {
                     Ok(v)
                 }
@@ -1058,6 +1072,29 @@ impl Interp {
                 "`forever` is not a value — it can only be the iterable of `for _ in forever:`",
                 e.span,
             )),
+            ExprKind::IfThenElse { cond, then_branch, else_branch } => {
+                // v0.3.9: ternary `if <cond> then <a> else <b>`.  The
+                // condition must be `bool` (no truthiness rule, same
+                // as the statement form).  Both branches share the
+                // result; the C backend additionally enforces
+                // type equality, the interpreter is naturally tolerant.
+                let c = self.eval(cond)?;
+                if self.pending_raise.is_some() {
+                    return Ok(Value::None_);
+                }
+                match c {
+                    Value::Bool(true) => self.eval(then_branch),
+                    Value::Bool(false) => self.eval(else_branch),
+                    v => Err(LingoError::new(
+                        Stage::Runtime,
+                        format!(
+                            "`if`-`then`-`else` condition must be bool, got {}",
+                            v.type_name()
+                        ),
+                        cond.span,
+                    )),
+                }
+            }
             ExprKind::Self_ => self.lookup("self").ok_or_else(|| {
                 LingoError::new(Stage::Runtime, "`self` is not in scope", e.span)
             }),

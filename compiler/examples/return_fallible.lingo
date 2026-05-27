@@ -1,0 +1,52 @@
+# v0.3.9: tail-position auto-`?`.
+#
+# Pre-v0.3.9, `return foo()` from a fallible fn — where `foo()` is
+# itself fallible with the same `! E` — silently double-wrapped
+# in the interpreter (every `match ok(n) / err(e)` site downstream
+# misbehaved) and produced a `cc` type error in the C backend
+# (`incompatible types when initializing type 'int' using type
+# 'lingo_result_..._t'`).
+#
+# v0.3.9 normalises both: when the inner expression already evaluates
+# to the same `T ! E` as the enclosing fn, the value is passed through
+# directly — equivalent to `return foo()?;` but without the visual
+# clutter at every tail call.  Errors continue to propagate through
+# the existing match arms.
+
+enum CalcError:
+    BadOp(str)
+    DivByZero
+
+fn apply(a: int, op: str, b: int) -> int ! CalcError:
+    if op == "+":
+        return a + b
+    elif op == "-":
+        return a - b
+    elif op == "*":
+        return a * b
+    elif op == "/":
+        if b == 0:
+            raise CalcError.DivByZero
+        return a / b
+    raise CalcError.BadOp(op)
+
+fn run(a: int, op: str, b: int) -> int ! CalcError:
+    # tail-call into another fallible fn, same `! CalcError`.
+    # No `?` needed — the result is forwarded as-is.
+    return apply(a: a, op: op, b: b)
+
+fn main():
+    match run(a: 12, op: "+", b: 30):
+        ok(n):                        print(f"= {n}")
+        err(CalcError.DivByZero):     print("div by zero")
+        err(CalcError.BadOp(o)):      print(f"bad op: {o}")
+
+    match run(a: 100, op: "/", b: 0):
+        ok(n):                        print(f"= {n}")
+        err(CalcError.DivByZero):     print("div by zero")
+        err(CalcError.BadOp(o)):      print(f"bad op: {o}")
+
+    match run(a: 5, op: "mod", b: 2):
+        ok(n):                        print(f"= {n}")
+        err(CalcError.DivByZero):     print("div by zero")
+        err(CalcError.BadOp(o)):      print(f"bad op: {o}")
