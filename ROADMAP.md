@@ -340,6 +340,58 @@ programs aren't forced to live in one `.lingo` file.
   green** (was 97/97).  audit **44/46** byte-identical.
   clippy 0 warnings.
 
+- [x] **`vec.sort()` on both backends (v0.3.9)**:
+  third dual-backend new method, after `s.repeat` (v0.3.6)
+  and `s.find` (v0.3.7).  In-place, ascending, **stable**.
+  Same plain-ident receiver restriction as
+  `push`/`pop`/`set`/`clear`/`reverse` — calling
+  `vec[3, 1, 2].sort()` on a literal is a clear
+  resolve-time diagnostic on the C backend, not a silent
+  miscompile.  *Interp side*: a single `("sort", 0)` arm in
+  the `Vec_` dispatch.  Element type is inferred from the
+  first element (int / float / bool / str); the rest of the
+  vec must match.  Mixed-type and user-typed vecs are
+  rejected at call time with a precise error pointing at the
+  call site.  Sort is `sort_by` (Rust's stable merge sort)
+  with `partial_cmp(...).unwrap_or(Equal)` for floats — so
+  NaN-involving comparisons keep stable position rather than
+  panicking.  *C backend*: `("sort", 0)` lowers to
+  `lingo_vec_<T>_sort(&v)` for `T` in {`i64`, `f64`,
+  `str`}; user-typed vecs are rejected at the call site
+  with a clear "Ord trait deferred" diagnostic.  Three new
+  static runtime helpers (`lingo_vec_i64_sort`,
+  `lingo_vec_f64_sort`, `lingo_vec_str_sort`) implement a
+  bottom-up iterative **stable merge sort**: log(n) passes,
+  each pass merges adjacent runs of doubling width into a
+  malloc'd tmp buffer, then copies back.  `<=` / `!(b < a)`
+  / `strcmp(...) <= 0` on the merge step keeps left-run
+  elements first on equal keys (the textbook stability
+  invariant).  Stability is non-negotiable here: the interp
+  is stable, and the v0.3.x design pin requires byte-
+  identical interp ≡ native output — qsort is unstable so we
+  don't use it.  For f64, `!(b < a)` makes
+  NaN-involving comparisons fall through to "left wins",
+  bit-for-bit matching interp's `partial_cmp.unwrap_or(Equal)`
+  fallback.  Empty / len-1 vecs are no-ops in both backends
+  (the outer `width` loop doesn't run).  Tmp buffer sized
+  to `len` elements; freed before return.  O(n log n) time,
+  O(n) space.  new example `vec_sort_native.lingo` (i64
+  ascending, duplicates stability check, already-sorted
+  no-op, reverse-sorted, negatives + zero, f64 sort, str
+  sort, bytewise / case-sensitive str sort, empty + single
+  edge cases, sort+reverse for descending, post-push sort
+  reusing the slab).  3 new tests (`vec_sort_interp`,
+  `c_backend_vec_sort_native_matches_interp`,
+  `c_backend_vec_sort_rejects_literal_receiver`).  **102/102
+  green** (was 99/99).  audit **45/47** byte-identical.
+  clippy 0 warnings.  *Deferred to a future v0.3.x*:
+  `vec[Struct].sort()` and `vec[Enum].sort()` need an `Ord`
+  trait — same shape as the `From[E]` machinery from v0.2.3
+  — to feed comparator wiring through the user's
+  `impl Ord for T:` block.  The runtime helper for user-
+  typed vecs (in `emit_user_vec_runtime`) is unchanged for
+  v0.3.9; we'll grow it once the trait lands.
+
 then the stdlib itself, a deliberately small core:
 
 - `io` — stdin/stdout/stderr, buffered readers/writers

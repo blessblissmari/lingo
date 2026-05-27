@@ -1459,3 +1459,67 @@ fn to_str_rejects_map_value() {
         .expect("run lingo emit-c");
     assert!(!out.status.success(), "should reject to_str(map) on C backend");
 }
+
+
+/// v0.3.9: `vec.sort()` — in-place, ascending, stable.  Same plain-ident
+/// receiver restriction as push/pop/set/clear/reverse.  C backend supports
+/// vec[i64], vec[f64], vec[str]; user types need an Ord trait (deferred).
+/// Stability matters because the C backend uses a stable bottom-up merge
+/// sort, the interp uses Rust's `sort_by` (also stable), so the byte-
+/// identical interp ≡ native pin holds even when the input has duplicates.
+#[test]
+fn vec_sort_interp() {
+    let (out, _stderr, code) = run("vec_sort_native.lingo");
+    assert_eq!(code, 0);
+    assert!(out.contains("vec[1, 2, 3, 4, 5]"), "missing i64 ascending:\n{out}");
+    assert!(
+        out.contains("vec[1, 1, 1, 2, 2, 3, 3]"),
+        "missing duplicates / stability check:\n{out}"
+    );
+    assert!(out.contains("vec[1.41, 1.61, 2.71, 3.14]"), "missing f64 sort:\n{out}");
+    assert!(
+        out.contains("vec[apple, apple, banana, cherry]"),
+        "missing str sort:\n{out}"
+    );
+    assert!(
+        out.contains("vec[Bob, Charlie, alice, bob]"),
+        "missing bytewise / case-sensitive str sort:\n{out}"
+    );
+    assert!(out.contains("empty after sort: len=0"), "missing empty edge:\n{out}");
+    assert!(out.contains("vec[42]"), "missing single-element edge:\n{out}");
+    assert!(out.contains("vec[9, 8, 5, 3, 2, 1]"), "missing sort+reverse desc:\n{out}");
+    assert!(out.contains("vec[1, 3, 5, 7]"), "missing post-push sort:\n{out}");
+}
+
+#[test]
+fn c_backend_vec_sort_native_matches_interp() {
+    let Some((native_out, stderr, code)) = run_native("vec_sort_native.lingo") else { return };
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (interp_out, _, _) = run("vec_sort_native.lingo");
+    assert_eq!(native_out, interp_out, "interp ≡ native byte-identical");
+}
+
+/// `vec.sort()` is mutating; receiver must be a plain ident (same
+/// restriction as `push`/`pop`/`set`/`clear`/`reverse`).  Calling on a
+/// literal must produce a clear diagnostic, not silent miscompile.
+#[test]
+fn c_backend_vec_sort_rejects_literal_receiver() {
+    let bin = env!("CARGO_BIN_EXE_lingo");
+    let path = std::env::temp_dir().join("lingo_vec_sort_literal.lingo");
+    std::fs::write(
+        &path,
+        "fn main():\n    vec[3, 1, 2].sort()\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run lingo build");
+    assert!(!out.status.success(), "C backend should reject vec.sort on literal");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`vec.sort` receiver must be a plain variable"),
+        "wrong diagnostic: {stderr}"
+    );
+}

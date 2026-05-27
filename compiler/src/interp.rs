@@ -1765,9 +1765,72 @@ impl Interp {
                         rc.borrow_mut().reverse();
                         Ok(Some(Value::None_))
                     }
+                    // v0.3.9: `vec.sort()` — in-place, stable, ascending.
+                    // Element type is inferred from the first non-empty
+                    // element: int / float / bool / str.  Mixed-type vecs
+                    // and user-typed vecs (struct/enum) are rejected at
+                    // call time with a precise error pointing at the call
+                    // site.  Empty / len-1 vecs are a no-op.  Stability
+                    // matters because the C backend's stable merge-sort
+                    // runtime helper produces byte-identical output —
+                    // an unstable sort would split the interp ≡ native
+                    // pin on inputs with duplicates.
+                    ("sort", 0) => {
+                        let mut v = rc.borrow_mut();
+                        if v.len() < 2 {
+                            return Ok(Some(Value::None_));
+                        }
+                        // Type-tag the vec from the first element.
+                        // The rest must match exactly.
+                        enum SortKind { Int, Float, Bool, Str }
+                        let kind = match &v[0] {
+                            Value::Int(_) => SortKind::Int,
+                            Value::Float(_) => SortKind::Float,
+                            Value::Bool(_) => SortKind::Bool,
+                            Value::Str(_) => SortKind::Str,
+                            other => return Err(LingoError::new(
+                                Stage::Runtime,
+                                format!("vec.sort: element type `{}` not supported \
+                                         (have: int, float, bool, str)", other.type_name()),
+                                call_span,
+                            )),
+                        };
+                        for (i, e) in v.iter().enumerate().skip(1) {
+                            let ok = matches!(
+                                (&kind, e),
+                                (SortKind::Int, Value::Int(_))
+                                    | (SortKind::Float, Value::Float(_))
+                                    | (SortKind::Bool, Value::Bool(_))
+                                    | (SortKind::Str, Value::Str(_))
+                            );
+                            if !ok {
+                                return Err(LingoError::new(
+                                    Stage::Runtime,
+                                    format!("vec.sort: mixed element types — \
+                                             index 0 is {}, index {} is {}",
+                                            v[0].type_name(), i, e.type_name()),
+                                    call_span,
+                                ));
+                            }
+                        }
+                        // Rust's sort_by is stable.  For floats we use
+                        // partial_cmp and treat NaN as equal-to-everything;
+                        // C side mirrors via direct `<` (NaN comparisons
+                        // are all false, so NaN keeps its index — same
+                        // outcome as Equal here).
+                        v.sort_by(|a, b| match (a, b) {
+                            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                            (Value::Float(x), Value::Float(y)) =>
+                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                            (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+                            (Value::Str(x), Value::Str(y)) => x.cmp(y),
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                        Ok(Some(Value::None_))
+                    }
                     (m, n) => Err(LingoError::new(
                         Stage::Runtime,
-                        format!("no method `vec.{}` with {} arg(s) (known: len/push/pop/get/set/contains/clear/reverse)", m, n),
+                        format!("no method `vec.{}` with {} arg(s) (known: len/push/pop/get/set/contains/clear/reverse/sort)", m, n),
                         call_span,
                     )),
                 }
