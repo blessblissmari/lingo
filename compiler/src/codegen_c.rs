@@ -3801,6 +3801,33 @@ impl Codegen {
                          self.pad(), elem_suffix, ident).unwrap();
                 Ok(("(void)0".to_string(), CType::Void))
             }
+            // v0.3.9: `vec.sort()` — in-place, stable, ascending.  Same
+            // receiver-must-be-a-plain-ident restriction as push/pop/set/
+            // clear/reverse.  Stable bottom-up merge sort emitted in the
+            // runtime block (and per user struct/enum via
+            // `emit_user_vec_runtime` — so vec[Point].sort() compiles
+            // once we add an Ord trait; today we reject struct/enum
+            // element types at the call site).
+            ("sort", 0) => {
+                let ident = recv_ident.ok_or_else(|| LingoError::new(
+                    Stage::Resolve,
+                    "C backend: `vec.sort` receiver must be a plain variable",
+                    recv.span,
+                ))?;
+                match &elem_ty {
+                    CType::I64 | CType::F64 | CType::Str => {}
+                    other => return Err(LingoError::new(
+                        Stage::Resolve,
+                        format!("C backend: `vec.sort` on element type `{}` not supported yet \
+                                 (have: i64, f64, str — user types need an Ord trait, tracked for v0.3.x)",
+                                other.c_decl()),
+                        span,
+                    )),
+                }
+                writeln!(self.body, "{}lingo_vec_{}_sort(&{});",
+                         self.pad(), elem_suffix, ident).unwrap();
+                Ok(("(void)0".to_string(), CType::Void))
+            }
             ("set", 2) => {
                 let ident = recv_ident.ok_or_else(|| LingoError::new(
                     Stage::Resolve,
@@ -3838,7 +3865,7 @@ impl Codegen {
             (m, n) => Err(LingoError::new(
                 Stage::Resolve,
                 format!("C backend: `vec.{}` with {} arg(s) is not supported yet \
-                         (have: len/0, get/1, push/1, pop/0, set/2, contains/1, clear/0, reverse/0)", m, n),
+                         (have: len/0, get/1, push/1, pop/0, set/2, contains/1, clear/0, reverse/0, sort/0)", m, n),
                 span,
             )),
         }
@@ -4768,6 +4795,95 @@ static void lingo_vec_str_reverse(lingo_vec_str_t* v) {
     for (int64_t i = 0, j = v->len - 1; i < j; ++i, --j) {
         const char* t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t;
     }
+}
+
+/* === vec sort (v0.3.9) ===
+ * Stable, ascending, in-place.  Bottom-up iterative merge sort: log(n)
+ * passes, each pass merges adjacent runs of doubling width into a tmp
+ * buffer, then copies back.  Stable by construction (the merge step picks
+ * from the left run when keys are equal, with `<=` on the comparison).
+ *
+ * Stability is non-negotiable here: the interp uses Rust's `sort_by`
+ * which is stable, and the v0.3.9 design pin requires byte-identical
+ * interp == native output.  qsort is not stable, so we don't use it.
+ *
+ * For f64, NaN comparisons are all false, so `a < b` returns false in
+ * both directions -- NaN values keep their relative order with respect
+ * to non-NaN elements (stable position).  Matches the interp's
+ * `partial_cmp(...).unwrap_or(Equal)` behaviour bit for bit.
+ *
+ * Allocates a single tmp buffer of `len` elements; freed before return.
+ * O(n log n) time, O(n) space.  Empty / len-1 vecs are no-ops (the
+ * outer `width` loop doesn't run).
+ */
+__attribute__((unused))
+static void lingo_vec_i64_sort(lingo_vec_i64_t* v) {
+    if (v->len < 2) return;
+    int64_t* tmp = (int64_t*)malloc((size_t)v->len * sizeof(int64_t));
+    if (!tmp) { fprintf(stderr, \"lingo: oom in vec_i64_sort\\n\"); exit(1); }
+    for (int64_t width = 1; width < v->len; width *= 2) {
+        for (int64_t i = 0; i < v->len; i += 2 * width) {
+            int64_t left = i;
+            int64_t mid = i + width < v->len ? i + width : v->len;
+            int64_t right = i + 2 * width < v->len ? i + 2 * width : v->len;
+            int64_t a = left, b = mid, k = left;
+            while (a < mid && b < right) {
+                if (v->data[a] <= v->data[b]) tmp[k++] = v->data[a++];
+                else tmp[k++] = v->data[b++];
+            }
+            while (a < mid) tmp[k++] = v->data[a++];
+            while (b < right) tmp[k++] = v->data[b++];
+            for (int64_t j = left; j < right; j++) v->data[j] = tmp[j];
+        }
+    }
+    free(tmp);
+}
+__attribute__((unused))
+static void lingo_vec_f64_sort(lingo_vec_f64_t* v) {
+    if (v->len < 2) return;
+    double* tmp = (double*)malloc((size_t)v->len * sizeof(double));
+    if (!tmp) { fprintf(stderr, \"lingo: oom in vec_f64_sort\\n\"); exit(1); }
+    for (int64_t width = 1; width < v->len; width *= 2) {
+        for (int64_t i = 0; i < v->len; i += 2 * width) {
+            int64_t left = i;
+            int64_t mid = i + width < v->len ? i + width : v->len;
+            int64_t right = i + 2 * width < v->len ? i + 2 * width : v->len;
+            int64_t a = left, b = mid, k = left;
+            while (a < mid && b < right) {
+                /* `!(b < a)` keeps the left run first on equal keys
+                 * (stable) and treats NaN-involving comparisons as
+                 * left-wins -- same as interp's partial_cmp.unwrap_or(Equal). */
+                if (!(v->data[b] < v->data[a])) tmp[k++] = v->data[a++];
+                else tmp[k++] = v->data[b++];
+            }
+            while (a < mid) tmp[k++] = v->data[a++];
+            while (b < right) tmp[k++] = v->data[b++];
+            for (int64_t j = left; j < right; j++) v->data[j] = tmp[j];
+        }
+    }
+    free(tmp);
+}
+__attribute__((unused))
+static void lingo_vec_str_sort(lingo_vec_str_t* v) {
+    if (v->len < 2) return;
+    const char** tmp = (const char**)malloc((size_t)v->len * sizeof(const char*));
+    if (!tmp) { fprintf(stderr, \"lingo: oom in vec_str_sort\\n\"); exit(1); }
+    for (int64_t width = 1; width < v->len; width *= 2) {
+        for (int64_t i = 0; i < v->len; i += 2 * width) {
+            int64_t left = i;
+            int64_t mid = i + width < v->len ? i + width : v->len;
+            int64_t right = i + 2 * width < v->len ? i + 2 * width : v->len;
+            int64_t a = left, b = mid, k = left;
+            while (a < mid && b < right) {
+                if (strcmp(v->data[a], v->data[b]) <= 0) tmp[k++] = v->data[a++];
+                else tmp[k++] = v->data[b++];
+            }
+            while (a < mid) tmp[k++] = v->data[a++];
+            while (b < right) tmp[k++] = v->data[b++];
+            for (int64_t j = left; j < right; j++) v->data[j] = tmp[j];
+        }
+    }
+    free(tmp);
 }
 
 /* === show runtime (v0.3.3) ===

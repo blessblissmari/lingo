@@ -7,7 +7,7 @@ fast as zig. simple as python. loved by llm agents.
 
 </div>
 
-> ⚠️ **status:** v0.3.8 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  v0.3.0 brought multi-file modules; v0.3.1 added cross-module type refs and struct literals; v0.3.2 opened `==`/`!=` to user types; v0.3.3 added the `to_str(v)` builtin; v0.3.4 closed `s.replace` in native; v0.3.5 added `vec.reverse()` + `vec.clear()` in native; v0.3.6 introduced `s.repeat(n)` on both backends; v0.3.7 added `s.find(needle) -> Opt[int]` on both backends; v0.3.8 lifts `Opt[T]` to a first-class type annotation in the C backend (param, return, let-binding, struct field) — closes the v0.3.7 limitation, and per-T `lingo_opt_<T>_str` formatters are now emitted for every signature suffix the user touches.  99/99 integration tests green; **44/46 applicable examples** byte-identical interp ≡ native.  clippy 0 warnings.
+> ⚠️ **status:** v0.3.9 — bootstrap interpreter, **working C backend**, **interactive REPL**, plus everything from v0.2.x.  v0.3.0 brought multi-file modules; v0.3.1 added cross-module type refs and struct literals; v0.3.2 opened `==`/`!=` to user types; v0.3.3 added the `to_str(v)` builtin; v0.3.4 closed `s.replace` in native; v0.3.5 added `vec.reverse()` + `vec.clear()` in native; v0.3.6 introduced `s.repeat(n)` on both backends; v0.3.7 added `s.find(needle) -> Opt[int]` on both backends; v0.3.8 lifts `Opt[T]` to a first-class type annotation in the C backend (param, return, let-binding, struct field) — closes the v0.3.7 limitation, and per-T `lingo_opt_<T>_str` formatters are now emitted for every signature suffix the user touches; v0.3.9 adds `vec.sort()` on both backends (stable, ascending, in-place) for `vec[i64]` / `vec[f64]` / `vec[str]` — the C backend uses a stable bottom-up merge sort, so the interp ≡ native byte-identical pin holds even on inputs with duplicates.  102/102 integration tests green; **45/47 applicable examples** byte-identical interp ≡ native.  clippy 0 warnings.
 > structs / enums / `match` / `vec[T]` / `map[str, i64]` / f-strings / utf-8 / `T ! E` error types / `?` / io builtins / traits all work in the interpreter; a growing subset compiles to native via the C backend (≈3000× faster on `fib(35)`, ≈3000× on `vec` ops, byte-identical output on `wordcount`).
 > all design decisions are committed in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 > disagree? open an issue.
@@ -136,7 +136,7 @@ fn main():
 9. **traits for behaviour, structs for data.** no inheritance.
 10. **native backend + monomorphized generics** → target: within 10% of zig.
 
-## what works today (v0.3.8)
+## what works today (v0.3.9)
 
 ### interpreter
 
@@ -145,6 +145,7 @@ fn main():
 - arithmetic, comparison, boolean ops, `**`, `%`
 - structs + methods, enums + `match`, traits + `impl T for U` (incl. default methods)
 - `vec[T]` literals, `map[K, V]` literals + methods (`.len`, `.has`, `.get`, `.set`, `.keys`, `.values`, `.contains`, `.remove`, `.clear`)
+- vec methods: `.len`, `.push`, `.pop`, `.get`, `.set`, `.contains`, `.clear`, `.reverse`, `.sort` (stable, asc; primitives only)
 - string runtime: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.to_upper`, `.to_lower`, `.trim`, `.split`, `.replace`, `.repeat`, `.find`
 - f-strings: `f"x={x}, y={point.x + 1}"`
 - error types: `T ! E`, `?` propagation, `raise`, `ok(v)` / `err(e)`
@@ -160,7 +161,7 @@ shells out to `cc` to produce a native binary. supported today:
 - `fn`, control flow, recursion
 - structs with fields + methods (static and instance), auto-debug `print(point)`
 - enums with payloads + `match` + auto-debug `print(shape)`
-- `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `.push`, `.pop`, `.set`, `.contains`, `.clear`, `.reverse`, `for`-iteration (owning, heap-backed)
+- `vec[i64]`, `vec[f64]`, `vec[str]` literals + `.len`, `.get`, `.push`, `.pop`, `.set`, `.contains`, `.clear`, `.reverse`, `.sort`, `for`-iteration (owning, heap-backed)
 - `map[str, i64]` empty literals + `.len`, `.has`, `.get`, `.set`, `.keys`
 - string ops: `+`, `.len`, `.contains`, `.starts_with`, `.ends_with`, `.split`, `.trim`, `.to_upper`, `.to_lower`, `.replace`, `.repeat`, `.find`
 - f-strings (allocated via 2-pass `vsnprintf`)
@@ -208,6 +209,14 @@ buffer alive so a `push` after `clear` reuses the slab — matches
 interp `Vec::clear`.
 [`vec_reverse_native`](compiler/examples/vec_reverse_native.lingo)
 
+**`vec.sort()` on both backends (v0.3.9)** — in-place,
+ascending, **stable**.  Same plain-ident receiver restriction.
+C backend supports `vec[i64]` / `vec[f64]` / `vec[str]` via a
+stable bottom-up merge sort — identical output to the interp
+even on inputs with duplicates.  User types need an `Ord`
+trait, deferred to a future v0.3.x.
+[`vec_sort_native`](compiler/examples/vec_sort_native.lingo)
+
 native-capable:
 [`hello`](compiler/examples/hello.lingo) ·
 [`forever`](compiler/examples/forever.lingo) ·
@@ -230,6 +239,7 @@ native-capable:
 [`str_chars_native`](compiler/examples/str_chars_native.lingo) ·
 [`str_replace_native`](compiler/examples/str_replace_native.lingo) ·
 [`vec_reverse_native`](compiler/examples/vec_reverse_native.lingo) ·
+[`vec_sort_native`](compiler/examples/vec_sort_native.lingo) ·
 [`str_repeat_native`](compiler/examples/str_repeat_native.lingo) ·
 [`str_find_native`](compiler/examples/str_find_native.lingo) ·
 [`opt_param_native`](compiler/examples/opt_param_native.lingo) ·
